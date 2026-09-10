@@ -45,6 +45,18 @@ Không tóm tắt lại diff, không khen. Mỗi phát hiện 1-3 dòng.
 Nếu không có gì đáng nói, trả lời đúng một dòng: Không thấy vấn đề đáng lưu ý."""
 
 
+# Chỉ những biến này đi tiếp vào tiến trình xử lý dữ liệu không tin cậy.
+# Gateway Hermes mang token Feishu/GitHub trong env — kế thừa cả `os.environ`
+# là đưa thẳng chúng vào phiên đang đọc diff của người ngoài.
+KEEP_ENV = (
+    "PATH", "USER", "LOGNAME", "SHELL", "TERM", "TMPDIR", "TZ",
+    "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE",
+    "SSL_CERT_FILE", "SSL_CERT_DIR",
+    # gh lưu token trong keyring, cần DBus để đọc.
+    "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR",
+)
+
+
 def child_env():
     """Env cho `gh` và `claude`.
 
@@ -54,14 +66,18 @@ def child_env():
     keyring. Lấy lại home thật từ /etc/passwd nên không phụ thuộc biến nào.
     """
     home = os.environ.get("HERMES_REAL_HOME") or pwd.getpwuid(os.getuid()).pw_dir
-    return {
-        **os.environ,
-        "HOME": home,
-        "GH_CONFIG_DIR": os.path.join(home, ".config", "gh"),
-        "GH_NO_UPDATE_NOTIFIER": "1",
-        "GH_PROMPT_DISABLED": "1",
-        "NO_COLOR": "1",
-    }
+    env = {k: os.environ[k] for k in KEEP_ENV if k in os.environ}
+    env.update(
+        HOME=home,
+        GH_CONFIG_DIR=os.path.join(home, ".config", "gh"),
+        GH_NO_UPDATE_NOTIFIER="1",
+        GH_PROMPT_DISABLED="1",
+        NO_COLOR="1",
+    )
+    return env
+
+
+ENV = child_env()
 
 
 def log(msg):
@@ -74,28 +90,29 @@ def cap_diff(diff, max_lines=MAX_DIFF_LINES, max_chars=MAX_DIFF_CHARS):
     Phải chặn theo cả số dòng lẫn số ký tự: 1500 dòng của một file minified có
     thể là vài MB, đủ để claude nuốt trọn rồi treo tới hết timeout.
     """
-    lines = diff.splitlines()
-    kept, size, reason = [], 0, None
+    lines = diff.split("\n")
+    kept, size, reasons = [], 0, []
 
     if len(lines) > max_lines:
-        reason = f"quá {max_lines} dòng"
+        reasons.append(f"quá {max_lines} dòng")
 
     for line in lines[:max_lines]:
         if size + len(line) + 1 > max_chars:
-            # Một dòng minified có thể dài hơn cả trần. Cắt ngang nó, đừng trả
-            # về rỗng rồi vẫn đăng comment "đã review".
-            if not kept:
-                kept.append(line[: max_chars - 1])
-            reason = f"quá {max_chars} ký tự"
+            # Một dòng minified có thể dài hơn cả trần, ở bất kỳ vị trí nào.
+            # Cắt ngang nó, đừng trả về rỗng rồi vẫn đăng comment "đã review".
+            room = max_chars - size - 1
+            if room > 0:
+                kept.append(line[:room])
+            reasons.append(f"quá {max_chars} ký tự")
             break
         size += len(line) + 1
         kept.append(line)
 
-    if reason is None:
+    if not reasons:
         return diff, None
     dropped = len(lines) - len(kept)
-    tail = f"\n\n[... đã cắt {dropped} dòng cuối ...]" if dropped else "\n\n[... dòng cuối bị cắt ngang ...]"
-    return "\n".join(kept) + tail, reason
+    tail = f"\n\n[... đã cắt {dropped} dòng cuối ...]" if dropped > 0 else "\n\n[... dòng cuối bị cắt ngang ...]"
+    return "\n".join(kept) + tail, " và ".join(reasons)
 
 
 def fence(diff):
@@ -118,7 +135,7 @@ def run(argv, stdin=None, timeout=GH_TIMEOUT, cwd=None):
             text=True,
             timeout=timeout,
             cwd=cwd,
-            env=child_env(),
+            env=ENV,
         )
     except subprocess.TimeoutExpired:
         log(f"TIMEOUT {timeout}s: {' '.join(argv[:3])}")
@@ -133,14 +150,19 @@ def run(argv, stdin=None, timeout=GH_TIMEOUT, cwd=None):
 
 
 def fail(repo, pr, why):
-    """Báo hỏng ngay trên PR. Job chết im lặng là không ai biết PR chưa được review."""
+    """Báo hỏng lên PR. Trả True nếu comment lên được.
+
+    Chết im lặng thì không ai biết PR chưa được review. Nhưng khi chính `gh`
+    là thứ đang hỏng thì comment cũng không lên được — lúc đó phải trả về
+    False để hook nhả claim, còn hơn vừa im lặng vừa khoá luôn PR.
+    """
     log(f"HỎNG: {why}")
-    run(
+    return run(
         ["gh", "pr", "comment", pr, "--repo", repo, "--body-file", "-"],
         stdin=f"⚠️ **Claude Code review không chạy được** — {why}.\n\n"
         "Đẩy thêm một commit để thử lại, hoặc chạy tay: "
         f"`./pr_review.py {repo} {pr}`",
-    )
+    ) is not None
 
 
 def main():
@@ -153,7 +175,7 @@ def main():
         sys.exit(f"pr_number phải là số nguyên, nhận: {sys.argv[2]!r}")
 
     started = time.time()
-    log(f"BẮT ĐẦU repo={repo} pr={pr} home={child_env()['HOME']}")
+    log(f"BẮT ĐẦU repo={repo} pr={pr} home={ENV['HOME']}")
 
     # Thử lại một lần: lần treo 120s ở PR #2 là do gh dò keyring dưới HOME sai.
     diff = run(["gh", "pr", "diff", pr, "--repo", repo])
@@ -161,8 +183,10 @@ def main():
         log("thử lại gh pr diff")
         diff = run(["gh", "pr", "diff", pr, "--repo", repo])
     if diff is None:
-        fail(repo, pr, "không lấy được diff của PR (gh pr diff lỗi hoặc quá hạn)")
-        return 1
+        # `gh` đang hỏng nên đừng thử comment bằng chính nó. Mã 2 = chưa báo
+        # được, hook sẽ nhả claim để lần delivery sau còn chạy lại.
+        log("HỎNG: không lấy được diff của PR")
+        return 2
     if not diff.strip():
         log("BỎ QUA: diff rỗng")
         return 0
@@ -180,12 +204,10 @@ def main():
             cwd=empty,
         )
     if review is None:
-        fail(repo, pr, "Claude Code không trả về được review (lỗi hoặc quá hạn)")
-        return 1
+        return 1 if fail(repo, pr, "Claude Code lỗi hoặc quá hạn") else 2
     review = review.strip()
     if not review:
-        fail(repo, pr, "Claude Code trả về rỗng")
-        return 1
+        return 1 if fail(repo, pr, "Claude Code trả về rỗng") else 2
 
     comment = f"🤖 **Claude Code review**\n\n{review}"
     if cut:
@@ -195,7 +217,8 @@ def main():
         ["gh", "pr", "comment", pr, "--repo", repo, "--body-file", "-"],
         stdin=comment,
     ) is None:
-        return 1
+        log("HỎNG: review xong nhưng không đăng được comment")
+        return 2
 
     log(f"XONG sau {time.time() - started:.0f}s")
     return 0

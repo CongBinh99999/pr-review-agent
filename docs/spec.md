@@ -52,11 +52,14 @@ Viết lại những thứ này bằng FastAPI là làm lại việc đã xong.
   payload cũ nên cùng sha, còn push mới thì khác sha. Claim tạo bằng `mkdir`
   (atomic) và gắn với từng sha, để job của sha cũ không nhả claim của sha mới.
 - **Diff là dữ liệu do người ngoài kiểm soát.** Phiên `claude -p` phải chạy
-  `--restricted --strict-mcp-config`, danh sách chặn tool, cwd là thư mục rỗng,
-  và diff bọc giữa hai mốc mang nonce ngẫu nhiên. `--allowedTools ""` KHÔNG
-  chặn được gì — đã kiểm bằng file mồi.
-- Webhook secret sinh bằng `openssl rand`, lưu trong
-  `~/.hermes/webhook_subscriptions.json` (chmod 600), không nằm trong repo.
+  `--restricted --strict-mcp-config --tools ""` (allowlist rỗng — danh sách
+  chặn là fail-open, thiếu một tên là thủng), cwd là thư mục rỗng, env chỉ gồm
+  danh sách biến tối thiểu, và diff bọc giữa hai mốc mang nonce ngẫu nhiên.
+  `--allowedTools ""` KHÔNG chặn được gì — đã kiểm bằng file mồi.
+- Webhook secret sinh bằng `openssl rand`. Bản chính nằm trong
+  `~/.hermes/webhook_subscriptions.json` (chmod 600); bản tạm để dán vào GitHub
+  ở `~/.hermes/state/pr-review/webhook-secret` (chmod 600, xoá sau khi dùng).
+  Không bản nào nằm trong repo.
 - Gateway đang phục vụ bot Feishu production. Bật webhook platform cần restart
   gateway — chấp nhận vài giây gián đoạn.
 

@@ -2,8 +2,11 @@
 """Self-check: python3 test_pr_review.py
 
 Kiểm những chỗ dễ vỡ: cắt diff (dòng + ký tự), hàng rào chống injection, và
-hook (lọc action, claim atomic theo sha, nhả claim khi job fail, huỷ job cũ,
-thoát ngay).
+hook (validate input, claim atomic theo sha, giữ/nhả claim theo mã thoát của
+job, huỷ job cũ, thoát ngay).
+
+Quy ước mã thoát của pr_review.py: 0 xong, 1 hỏng-đã-báo-lên-PR (giữ claim để
+khỏi comment trùng), 2 hỏng-chưa-báo-được (nhả claim để còn chạy lại).
 """
 
 import json
@@ -145,25 +148,35 @@ def test_hook():
         assert not list(state.glob("*passwd*")), "sha rác lọt vào tên file"
         assert not list(state.parent.glob("*.pid")), "pr number rác thoát khỏi thư mục state"
 
-        # --- job fail -> claim ở lại, redeliver không đẻ comment trùng ------
+        # --- job hỏng mà chưa báo được (mã 2) -> nhả claim, chạy lại được ---
+        fake_cli(cli, log, exit_code=2)
+        fire(state, cli, payload(sha40("f")))
+        assert wait_for(lambda: len(runs(log)) == 2), "job không chạy"
+        assert wait_for(
+            lambda: not claim(sha40("f")).exists()
+        ), "mã 2 phải nhả claim, không thì PR im lặng vĩnh viễn"
+        fire(state, cli, payload(sha40("f")))
+        assert wait_for(lambda: len(runs(log)) == 3), "nhả claim rồi mà không chạy lại"
+
+        # --- job hỏng đã báo lên PR (mã 1) -> giữ claim, khỏi comment trùng --
         fake_cli(cli, log, exit_code=1)
         fire(state, cli, payload(sha40("ccc")))
-        assert wait_for(lambda: len(runs(log)) == 2), "job thứ hai không chạy"
+        assert wait_for(lambda: len(runs(log)) == 4), "job thứ hai không chạy"
         assert wait_for(lambda: not pidfile.exists()), "pidfile không được dọn"
         assert claim(sha40("ccc")).exists(), "claim phải ở lại: pr_review.py đã báo hỏng lên PR"
 
         fire(state, cli, payload(sha40("ccc")))  # GitHub redeliver
         time.sleep(1.0)
-        assert len(runs(log)) == 2, "redeliver chạy lại -> sẽ đẻ comment hỏng trùng"
+        assert len(runs(log)) == 4, "redeliver chạy lại -> sẽ đẻ comment hỏng trùng"
 
         # --- push mới -> huỷ job cũ, claim cũ không bị nhả nhầm -------------
         fake_cli(cli, log, sleep=30)
         fire(state, cli, payload(sha40("ddd")))
-        assert wait_for(lambda: len(runs(log)) == 3 and pidfile.exists())
+        assert wait_for(lambda: len(runs(log)) == 5 and pidfile.exists())
         old_pgid = int(pidfile.read_text())
 
         fire(state, cli, payload(sha40("eee")))
-        assert wait_for(lambda: len(runs(log)) == 4), "job mới không chạy"
+        assert wait_for(lambda: len(runs(log)) == 6), "job mới không chạy"
         assert wait_for(
             lambda: subprocess.run(
                 ["kill", "-0", "--", f"-{old_pgid}"], capture_output=True

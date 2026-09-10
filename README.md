@@ -58,6 +58,7 @@ hermes gateway restart
 umask 077
 mkdir -p ~/.hermes/state/pr-review
 openssl rand -hex 32 > ~/.hermes/state/pr-review/webhook-secret
+chmod 600 ~/.hermes/state/pr-review/webhook-secret
  hermes webhook subscribe pr-review \
     --events pull_request \
     --script pr-review.sh \
@@ -68,7 +69,8 @@ openssl rand -hex 32 > ~/.hermes/state/pr-review/webhook-secret
 Dấu cách đầu dòng `hermes` là cố ý — với `HISTCONTROL=ignorespace` thì lệnh
 không vào shell history. Secret vẫn hiện thoáng qua trong `ps` lúc chạy: Hermes
 chỉ nhận secret qua tham số dòng lệnh, không có đường env/stdin. Đọc lại secret
-bằng `cat ~/.hermes/state/pr-review/webhook-secret` khi cần dán vào GitHub.
+bằng `cat ~/.hermes/state/pr-review/webhook-secret` khi cần dán vào GitHub, rồi
+`shred -u` file đó — bản chính đã nằm trong `webhook_subscriptions.json`.
 
 **4. Trỏ GitHub vào** — Settings → Webhooks → Add webhook:
 
@@ -98,17 +100,19 @@ python3 test_pr_review.py                       # self-check
 
 - **Chống trùng** theo `head_sha`, claim tạo bằng `mkdir` nên atomic — hai
   delivery song song cùng một sha chỉ có một cái chạy.
-- **Job hỏng** (gh lỗi, claude timeout) → comment ⚠️ báo hỏng ngay trên PR kèm
-  cách chạy lại. Claim vẫn giữ, nên GitHub redeliver không đẻ comment trùng;
-  muốn thử lại thì đẩy commit mới hoặc chạy `./pr_review.py` bằng tay.
+- **Claude hỏng** → comment ⚠️ trên PR kèm cách chạy lại; claim giữ nguyên nên
+  redeliver không đẻ comment trùng.
+- **`gh` hỏng** → không comment được bằng chính công cụ đang hỏng, nên job nhả
+  claim (mã thoát 2) để lần delivery sau chạy lại.
 - **Push mới cho cùng PR** → huỷ job đang chạy, chỉ review sha mới nhất.
 - **Diff > 1500 dòng hoặc > 120k ký tự** → chỉ review phần đầu, comment ghi rõ
   cắt vì lý do nào.
 - **Diff là dữ liệu không tin cậy.** Nó được bọc giữa hai mốc mang nonce ngẫu
   nhiên (mốc cố định thì một file trong PR chỉ cần chứa đúng dòng đó là thoát
-  ra), và phiên review chạy `--restricted --strict-mcp-config` với danh sách
-  chặn tool, cwd trỏ vào thư mục rỗng. Đã kiểm bằng file mồi: phiên không đọc
-  được file trên đĩa.
+  ra), và phiên review chạy `--restricted --strict-mcp-config --tools ""` —
+  allowlist rỗng, không tool nào — với cwd trỏ vào thư mục rỗng và env chỉ gồm
+  danh sách biến tối thiểu (token của gateway không đi vào). Đã kiểm bằng file
+  mồi: phiên không đọc được file trên đĩa.
 - **`claude -p` treo quá 15 phút** → job bị giết, ghi log, không comment.
 
 ## Vì sao hook phải thoát ngay
