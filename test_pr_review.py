@@ -206,7 +206,7 @@ def test_hook():
         n = len(runs(log))
         fire(state, cli, payload(sha40("2")))
         assert wait_for(lambda: len(runs(log)) == n + 1)  # để job này xong hẳn
-        assert not stuck.exists(), "claim kẹt quá 60 phút phải được dọn"
+        assert not stuck.exists(), "claim kẹt quá 180 phút phải được dọn"
         assert done(sha40("aaa")).exists(), (
             "GC đụng vào .done -> redeliver sau 1 giờ sẽ đẻ comment review thứ hai"
         )
@@ -297,17 +297,42 @@ def test_tool_fence():
         f"Kiểm lại {CLAUDE_ARGS} với bản claude đang cài."
     )
 
-    # Chiều ngược: bỏ hàng rào thì PHẢI đọc được. Không có bước này thì một
-    # model chỉ đơn giản từ chối cũng cho kết quả y hệt "hàng rào kín".
-    token, r = ask([])
+    # Chiều ngược: bỏ ĐÚNG cờ allowlist, giữ nguyên --restricted (tool file bị
+    # giam trong cwd = thư mục tạm) thì PHẢI đọc được. Không có bước này thì
+    # một model chỉ đơn giản từ chối cũng cho kết quả y hệt "hàng rào kín" —
+    # nhưng cũng không được mở một phiên full tool trên máy vận hành.
+    loosened = [a for a in CLAUDE_ARGS if a not in ("--tools", "")]
+    token, r = ask(loosened)
     assert token in r.stdout, (
-        "canary vô nghĩa: không có hàng rào mà vẫn không đọc được file, nên "
-        "chiều xuôi ở trên không chứng minh được gì"
+        "canary vô nghĩa: bỏ allowlist mà vẫn không đọc được file, nên chiều "
+        f"xuôi ở trên không chứng minh được gì (đã chạy: {loosened})"
     )
     print("ok  tool fence (kín khi có rào, đọc được khi bỏ rào)")
 
 
 # Semaphore: hook từ chối khi đã đủ job đang chạy.
+def test_flags_exist():
+    """Cờ cách ly phải còn tồn tại trong bản `claude` đang cài.
+
+    Canary thật chạy 2 phiên claude nên nằm sau `--canary`; nhưng nếu một bản
+    mới bỏ `--tools` thì mọi PR sẽ nhận comment ⚠️ thay vì review, và không có
+    gì trong lượt test mặc định bắt được. Đây là lưới đỡ rẻ tiền cho chuyện đó.
+    """
+    from pr_review import CLAUDE_ARGS
+
+    if not shutil.which("claude"):
+        print("SKIP  flags_exist: không có `claude` trên máy")
+        return
+    help_text = subprocess.run(
+        ["claude", "--help"], capture_output=True, text=True, timeout=60
+    ).stdout
+    for flag in [a for a in CLAUDE_ARGS if a.startswith("--")]:
+        assert flag in help_text, (
+            f"bản claude đang cài không còn cờ {flag} — hàng rào cách ly hỏng"
+        )
+    print("ok  flags_exist (cờ cách ly còn trong bản claude đang cài)")
+
+
 def test_max_jobs():
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -338,7 +363,9 @@ def test_untrusted_author():
         assert fire(state, cli, payload(sha40("b"), assoc="CONTRIBUTOR"))[0] == "[SILENT]"
         time.sleep(1.0)
         assert not runs(log), "người ngoài kích được phiên claude"
-        assert not list(state.glob("*.claim")), "claim không được nhả khi từ chối"
+        assert not list(state.glob("*.claim")), (
+            "từ chối tác giả nhưng claim vẫn còn -> PR bị khoá vĩnh viễn"
+        )
 
         assert fire(state, cli, payload(sha40("c"), assoc="MEMBER"))[0] == "[SILENT]"
         assert wait_for(lambda: len(runs(log)) == 1), "MEMBER phải được review"
@@ -350,6 +377,7 @@ if __name__ == "__main__":
     test_fence()
     test_stale()
     test_hook()
+    test_flags_exist()
     test_max_jobs()
     test_untrusted_author()
     if "--canary" in sys.argv:

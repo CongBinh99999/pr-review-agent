@@ -175,7 +175,8 @@ def defang(text):
     text = re.sub(r"(?<![\w])@(?=[A-Za-z0-9])", f"@{z}", text)
     # Không neo đầu từ: `owner/repo#123` cũng là cross-reference.
     text = re.sub(r"(?<!&)#(?=\d)", f"#{z}", text)
-    text = re.sub(r"(?<![\w])GH-(?=\d)", f"GH-{z}", text)
+    text = re.sub(r"(?<![\w])(GH-)(?=\d)", lambda m: m.group(1) + z, text,
+                  flags=re.IGNORECASE)
     text = re.sub(r"(github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/)(pull|issues|commit)/",
                   rf"\1{z}\2/", text)
     return text
@@ -197,9 +198,12 @@ def stale(repo, pr):
     if head is None:
         return False  # không hỏi được thì cứ đăng, thà trùng còn hơn mất
     head = head.strip()
-    # So sánh prefix: payload có thể mang short sha, repo sha256 cho 64 ký tự.
-    # So tuyệt đối thì stale() luôn True và job im lặng vứt review sau 15 phút.
-    return not (head.startswith(sha) or sha.startswith(head))
+    # Prefix để chịu được chênh độ dài (sha1 40 vs sha256 64), nhưng phải đủ
+    # dài mới coi là khớp — 7 ký tự đầu thì mọi HEAD cùng tiền tố đều lọt.
+    n = min(len(head), len(sha))
+    if n < 12:
+        return head != sha
+    return head[:n] != sha[:n]
 
 
 def fail(repo, pr, why):
@@ -259,7 +263,9 @@ def main():
     # cwd là thư mục rỗng: nếu hàng rào tool có thủng thì cũng không có gì để đọc.
     with tempfile.TemporaryDirectory() as empty:
         review = run(
-            ["claude", "-p", INSTRUCTIONS.format(nonce=nonce), *CLAUDE_ARGS],
+            # Cờ đặt TRƯỚC `-p`: đặt sau positional là phụ thuộc vào việc parser
+            # còn nhận flag ở đó; đổi cách parse là hàng rào biến thành text.
+            ["claude", *CLAUDE_ARGS, "-p", INSTRUCTIONS.format(nonce=nonce)],
             stdin=fenced,
             timeout=CLAUDE_TIMEOUT,
             cwd=empty,
@@ -276,13 +282,12 @@ def main():
         return 0
 
     comment = f"{HEADER}{defang(review)}"
-    if len(comment) > MAX_COMMENT:
-        # Cắt SAU khi escape (escape làm dài thêm) và cắt ở ranh giới dòng —
-        # cắt giữa cặp backtick của defang là mention sống lại đúng lúc cuối.
-        comment = comment[:MAX_COMMENT].rsplit("\n", 1)[0] + TRUNCATED
     if cut:
         comment += f"\n\n---\n_Diff {cut} — chỉ phần đầu được review._"
-
+    if len(comment) > MAX_COMMENT:
+        # Clamp SAU khi đã ghép đủ header/footer và đã escape, cắt ở ranh giới
+        # dòng. Ghép thêm sau khi clamp là tự phá cái trần mình vừa đặt.
+        comment = comment[:MAX_COMMENT].rsplit("\n", 1)[0] + TRUNCATED
     if run(
         ["gh", "pr", "comment", pr, "--repo", repo, "--body-file", "-"],
         env=GH_ENV,

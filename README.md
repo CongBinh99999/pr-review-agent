@@ -116,8 +116,10 @@ python3 test_pr_review.py --canary              # + kiểm hàng rào tool (~6 p
   redeliver không đẻ comment trùng.
 - **`gh` hỏng** → không comment được bằng chính công cụ đang hỏng. Job tự thử
   lại 3 lần (nghỉ 30s rồi 60s); Hermes đã trả 200 cho GitHub trước khi job
-  chạy nên GitHub sẽ không bao giờ redeliver, retry phải nằm trong job. Hết 3
-  lần thì nhả claim: đẩy commit mới hoặc chạy tay để thử lại.
+  chạy nên GitHub sẽ không bao giờ redeliver, retry phải nằm trong job. Lần
+  thử cuối vẫn cố đăng comment ⚠️ (PR to làm `gh pr diff` quá hạn trong khi
+  `gh pr comment` vẫn chạy được). Hết 3 lần thì nhả claim: đẩy commit mới hoặc
+  chạy tay để thử lại.
 - **Diff > 1500 dòng hoặc > 120k ký tự** → chỉ review phần đầu, comment ghi rõ
   cắt vì lý do nào.
 - **Diff là dữ liệu không tin cậy.** Nó được bọc giữa hai mốc mang nonce ngẫu

@@ -18,6 +18,9 @@ if [ "${1:-}" = "--job" ]; then
     # Hook đã trả 200 cho GitHub TRƯỚC khi job chạy, nên GitHub không có lý do
     # gì để redeliver. Muốn có retry thì phải tự làm ở đây.
     for attempt in 1 2 3; do
+        # Lần cuối: cho phép job cố đăng comment ⚠️ dù chính `gh` đang trục
+        # trặc, còn hơn để PR im lặng không dấu vết nào ngoài review.log.
+        [ $attempt -eq 3 ] && export PR_REVIEW_LAST_ATTEMPT=1
         "$CLI" "$repo" "$pr"
         rc=$?
         [ $rc -ne 2 ] && break
@@ -27,10 +30,14 @@ if [ "${1:-}" = "--job" ]; then
     # đổi .claim -> .done để chống trùng vĩnh viễn, GC không đụng tới.
     # 2 = chưa báo được (gh chết) -> nhả claim cho delivery sau chạy lại.
     # Chết bằng signal (OOM 137, thiếu file 127) thì .claim ở lại và GC dọn
-    # sau 60 phút — job dài nhất ~16 phút nên quá 1 giờ chắc chắn là rác.
+    # sau 180 phút (job xấu nhất ~54 phút, xem ghi chú ở khối GC bên dưới).
+    # -T: không có nó, `.done` đã tồn tại (do race) sẽ khiến mv nhét claim VÀO
+    # trong .done, làm .done không rỗng và GC `rmdir` không bao giờ dọn được.
+    # Mọi mã khác 0/1 (2, 127, 128+signal) đều nhả claim để giải phóng chỗ
+    # trong trần job song song.
     case $rc in
-        0|1) mv "$claim" "${claim%.claim}.done" 2>/dev/null ;;
-        2)   rmdir "$claim" 2>/dev/null ;;
+        0|1) mv -T "$claim" "${claim%.claim}.done" 2>/dev/null || rmdir "$claim" 2>/dev/null ;;
+        *)   rmdir "$claim" 2>/dev/null ;;
     esac
     exit 0
 fi
@@ -53,7 +60,7 @@ if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*", re
         or ".." in repo or repo.endswith(".git"):
     sys.exit(1)
 sha = d["pull_request"]["head"]["sha"]
-if not re.fullmatch(r"[0-9a-fA-F]{7,64}", sha):
+if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", sha):
     sys.exit(1)
 pr = int(d["number"])
 if pr <= 0:
@@ -82,7 +89,6 @@ find "$STATE" -maxdepth 1 -name '*.claim' -type d -mmin +180 -exec rmdir {} + 2>
 # .done giữ rất lâu để chống trùng, nhưng không vĩnh viễn: mỗi sha một thư mục.
 find "$STATE" -maxdepth 1 -name '*.done' -type d -mtime +90 -exec rmdir {} + 2>/dev/null
 
-# `:` không hợp lệ trong tên repo GitHub nên không thể đụng nhau.
 if [ ! -x "$CLI" ]; then
     # Thoát khác 0 (không `silent`) để Hermes ghi vào log gateway thay vì nuốt
     # lỗi cài đặt. Đã kiểm source: returncode != 0 đi đúng nhánh "ignored" như
@@ -109,14 +115,16 @@ mkdir "$claim" 2>/dev/null || silent
 # delivery song song đều thấy còn chỗ rồi cùng chạy.
 # ponytail: vẫn là xấp xỉ — N racer cùng vượt trần thì tất cả cùng lùi. An
 # toàn (thà ít hơn), đổi sang flock nếu cần trần cứng.
+max_jobs=${PR_REVIEW_MAX_JOBS:-3}
+case $max_jobs in ''|*[!0-9]*) max_jobs=3 ;; esac  # sai kiểu -> fail-closed về 3
 running=$(find "$STATE" -maxdepth 1 -name '*.claim' -type d 2>/dev/null | wc -l)
-if [ "$running" -gt "${PR_REVIEW_MAX_JOBS:-3}" ]; then
+if [ "$running" -gt "$max_jobs" ]; then
     note "TỪ CHỐI: $running job đang chạy, quá trần"
     rmdir "$claim" 2>/dev/null
     silent
 fi
 
-# 6: chỉ review PR của người trong nhà. Repo public trong allowlist thì bất kỳ
+# Chỉ review PR của người trong nhà. Repo public trong allowlist thì bất kỳ
 # ai fork cũng kích được một phiên claude chạy bằng credential của bạn.
 case "${PR_REVIEW_TRUSTED_ONLY:-1}:$assoc" in
     1:OWNER|1:MEMBER|1:COLLABORATOR|0:*) ;;
