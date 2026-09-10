@@ -29,12 +29,13 @@ if [ "${1:-}" = "--job" ]; then
     # 0 = xong, 1 = đã báo hỏng lên PR. Cả hai đều "đã xử lý xong sha này":
     # đổi .claim -> .done để chống trùng vĩnh viễn, GC không đụng tới.
     # 2 = chưa báo được (gh chết) -> nhả claim cho delivery sau chạy lại.
-    # Chết bằng signal (OOM 137, thiếu file 127) thì .claim ở lại và GC dọn
-    # sau 180 phút (job xấu nhất ~54 phút, xem ghi chú ở khối GC bên dưới).
+
     # -T: không có nó, `.done` đã tồn tại (do race) sẽ khiến mv nhét claim VÀO
     # trong .done, làm .done không rỗng và GC `rmdir` không bao giờ dọn được.
-    # Mọi mã khác 0/1 (2, 127, 128+signal) đều nhả claim để giải phóng chỗ
-    # trong trần job song song.
+    # Mọi mã khác 0/1 (2, 127, 128+signal của CLI) đều nhả claim ngay để giải
+    # phóng chỗ trong trần job song song. Chỉ khi chính wrapper --job bị giết
+    # (OOM cả process group, gateway restart) thì .claim mới ở lại và phải chờ
+    # GC dọn.
     case $rc in
         0|1) mv -T "$claim" "${claim%.claim}.done" 2>/dev/null || rmdir "$claim" 2>/dev/null ;;
         *)   rmdir "$claim" 2>/dev/null ;;
@@ -83,9 +84,9 @@ if ! grep -qxF "$repo" "$ALLOW" 2>/dev/null; then
 fi
 
 # Job xấu nhất: 3 lần thử × (60s diff + 900s claude + 30s stale + 60s comment)
-# + 90s nghỉ ≈ 54 phút. Ngưỡng 3 giờ để GC không bao giờ giật claim của job
-# đang sống — giật thì `mv .claim .done` hỏng im lặng và sha đó bị review lại.
-find "$STATE" -maxdepth 1 -name '*.claim' -type d -mmin +180 -exec rmdir {} + 2>/dev/null
+# + 90s nghỉ ≈ 54 phút. Ngưỡng 90 phút: đủ biên để không giật claim của job
+# đang sống, mà claim kẹt cũng không khoá trần job song song quá lâu.
+find "$STATE" -maxdepth 1 -name '*.claim' -type d -mmin +90 -exec rmdir {} + 2>/dev/null
 # .done giữ rất lâu để chống trùng, nhưng không vĩnh viễn: mỗi sha một thư mục.
 find "$STATE" -maxdepth 1 -name '*.done' -type d -mtime +90 -exec rmdir {} + 2>/dev/null
 

@@ -162,6 +162,7 @@ fd, rồi in `[SILENT]` để Hermes bỏ qua event (không kích hoạt agent L
   `claude` thật.
 - **Phiên review vẫn nhận `HOME` thật** (claude cần nó để đăng nhập), nên
   `~/.claude` và `~/.config/gh/hosts.yml` nằm trong tầm với *nếu* hàng rào tool
-  thủng. Test canary `test_tool_fence` là thứ canh chuyện đó.
+  thủng. `test_tool_fence` kiểm đúng chuyện này: nó thử đọc cả một file trong
+  cwd lẫn một file đường-dẫn-tuyệt-đối trong `$HOME`.
 - Không review inline theo dòng, chỉ một comment tổng.
 - State là file phẳng trong `~/.hermes/state/pr-review/`, mất khi xoá thư mục.

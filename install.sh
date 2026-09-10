@@ -11,11 +11,14 @@ SHIM="$HERMES_HOME/scripts/pr-review.sh"
 mkdir -p "$HERMES_HOME/scripts" "$HERMES_HOME/state/pr-review"
 ALLOW="$HERMES_HOME/state/pr-review/repos.allow"
 [ -f "$ALLOW" ] || : > "$ALLOW"
-if [ -e "$SHIM" ] && ! grep -qF "$REPO_DIR/scripts/hermes-hook.sh" "$SHIM"; then
+NEW=$(printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$REPO_DIR/scripts/hermes-hook.sh")
+# So nguyên nội dung: grep chuỗi chưa quote sẽ không bao giờ khớp khi đường dẫn
+# repo cần escape, và mỗi lần chạy lại đẻ thêm một file .bak executable.
+if [ -e "$SHIM" ] && [ "$(cat "$SHIM")" != "$NEW" ]; then
     cp -p "$SHIM" "$SHIM.bak-$(date +%Y%m%d-%H%M%S)"
     echo "Đã backup shim cũ (nội dung khác) sang $SHIM.bak-*"
 fi
-printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$REPO_DIR/scripts/hermes-hook.sh" > "$SHIM"
+printf '%s\n' "$NEW" > "$SHIM"
 chmod +x "$SHIM"
 
 echo "Đã cài shim: $SHIM -> $REPO_DIR/scripts/hermes-hook.sh"

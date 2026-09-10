@@ -67,9 +67,19 @@ def child_env(for_gh):
     Hermes ghi đè HOME cho tiến trình con (xem `apply_subprocess_home_env`) và
     cất bản gốc vào HERMES_REAL_HOME. Với HOME sai, `gh` không thấy
     ~/.config/gh và `claude` không thấy ~/.claude, rồi treo khi phải dò
-    keyring. Lấy lại home thật từ /etc/passwd nên không phụ thuộc biến nào.
+    Home thật lấy từ /etc/passwd; HERMES_REAL_HOME chỉ được dùng khi nó là
+    thư mục có thật và thuộc đúng uid đang chạy.
     """
-    home = os.environ.get("HERMES_REAL_HOME") or pwd.getpwuid(os.getuid()).pw_dir
+    home = pwd.getpwuid(os.getuid()).pw_dir
+    # HERMES_REAL_HOME đến từ env nên chỉ tin khi nó thật sự là thư mục của
+    # chính uid này; còn lại lấy từ /etc/passwd.
+    claimed = os.environ.get("HERMES_REAL_HOME")
+    if claimed and os.path.isdir(claimed):
+        try:
+            if os.stat(claimed).st_uid == os.getuid():
+                home = claimed
+        except OSError:
+            pass
     keys = BASE_ENV + (GH_ONLY_ENV if for_gh else ())
     env = {k: os.environ[k] for k in keys if k in os.environ}
     # claude cần HOME để tìm thông tin đăng nhập trong ~/.claude.
@@ -195,15 +205,12 @@ def stale(repo, pr):
         return False  # chạy tay
     head = run(["gh", "pr", "view", pr, "--repo", repo, "--json", "headRefOid",
                 "-q", ".headRefOid"], env=GH_ENV, timeout=30)
-    if head is None:
-        return False  # không hỏi được thì cứ đăng, thà trùng còn hơn mất
-    head = head.strip()
-    # Prefix để chịu được chênh độ dài (sha1 40 vs sha256 64), nhưng phải đủ
-    # dài mới coi là khớp — 7 ký tự đầu thì mọi HEAD cùng tiền tố đều lọt.
-    n = min(len(head), len(sha))
-    if n < 12:
-        return head != sha
-    return head[:n] != sha[:n]
+    head = (head or "").strip()
+    if not head:
+        # Hỏi không được (lỗi, hoặc rc=0 mà stdout rỗng) thì cứ đăng: thà
+        # trùng còn hơn im lặng vứt review và khoá sha đó vĩnh viễn.
+        return False
+    return head != sha
 
 
 def fail(repo, pr, why):
@@ -251,6 +258,13 @@ def main():
         # `gh` đang hỏng nên đừng thử comment bằng chính nó. Mã 2 = chưa báo
         # được, hook sẽ nhả claim để lần delivery sau còn chạy lại.
         log("HỎNG: không lấy được diff của PR")
+        # Lần thử cuối vẫn cố báo lên PR: PR to làm `gh pr diff` quá hạn trong
+        # khi `gh pr comment` vẫn chạy được, im lặng thì người mở PR không có
+        # tín hiệu nào ngoài review.log.
+        if os.environ.get("PR_REVIEW_LAST_ATTEMPT") and fail(
+            repo, pr, "không lấy được diff của PR (quá hạn hoặc gh lỗi)"
+        ):
+            return 1
         return 2
     if not diff.strip():
         log("BỎ QUA: diff rỗng")
