@@ -26,6 +26,7 @@ fi
 # --- chế độ hook: chạy trong request path của Hermes, phải nhanh -------------
 STATE="${PR_REVIEW_STATE:-${HERMES_HOME:-$HOME/.hermes}/state/pr-review}"
 LOG="$STATE/review.log"
+ALLOW="$STATE/repos.allow"
 
 silent() { echo "[SILENT]"; exit 0; }
 note()   { echo "[$(date '+%F %T')] $*" >> "$LOG"; }
@@ -58,34 +59,28 @@ if [ ! -x "$CLI" ]; then
     exit 1
 fi
 
-find "$STATE" -maxdepth 1 -name '*.claim' -type d -mtime +30 -exec rmdir {} + 2>/dev/null
-
-# Xoay log chỉ khi không có job nào đang giữ fd, nếu không job đó mất log.
-if [ -f "$LOG" ] && [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt 5242880 ] &&
-   ! pgrep -f "hermes-hook.sh --job" >/dev/null 2>&1; then
-    tmp=$(mktemp "$STATE/.log.XXXXXX")
-    if [ -n "${tmp:-}" ]; then
-        tail -c 1048576 "$LOG" > "$tmp" && mv "$tmp" "$LOG"
-        rm -f "$tmp"
-    fi
+# Allowlist repo, fail-closed. Secret webhook dùng chung và có thể lộ (ps,
+# shell history); ai có nó sẽ khiến bot đọc diff và comment lên bất kỳ repo nào
+# token của người vận hành với tới được. Không có allowlist thì không chạy.
+if ! grep -qxF "$repo" "$ALLOW" 2>/dev/null; then
+    note "TỪ CHỐI: $repo không có trong $ALLOW"
+    silent
 fi
+
+# Claim rò khi job chết bất thường (reboot, OOM, gateway restart) sẽ khoá PR
+# đó vĩnh viễn. Job dài nhất ~16 phút nên claim quá 1 giờ chắc chắn là rác.
+find "$STATE" -maxdepth 1 -name '*.claim' -type d -mmin +60 -exec rmdir {} + 2>/dev/null
 
 key="${repo//\//_}#$pr"
 claim="$STATE/$key@$sha.claim"
-guard="$STATE/$key.current"
 
 # Claim theo từng sha, tạo bằng mkdir nên atomic: hai delivery song song cùng
 # một sha thì chỉ một cái vào được. `reopened` mang đúng sha cũ nên sẽ bị chặn
 # ở đây — đúng ý: review của sha đó vẫn còn nguyên trên PR, không cần làm lại.
 mkdir "$claim" 2>/dev/null || silent
 
-# Huỷ hợp tác: ghi sha mới nhất vào file mốc (atomic bằng mv). Job của sha cũ
-# tự thấy mình lỗi thời và bỏ qua bước đăng comment. Không dùng kill nên không
-# có race pidfile, không có chuyện bắn nhầm process group khi PID bị cấp lại.
-tmp=$(mktemp "$STATE/.cur.XXXXXX") && printf '%s\n' "$sha" > "$tmp" &&
-    mv "$tmp" "$guard"
-
-PR_REVIEW_GUARD="$guard" PR_REVIEW_SHA="$sha" \
-    setsid bash "$SELF" --job "$repo" "$pr" "$claim" >>"$LOG" 2>&1 </dev/null &
+# Job tự hỏi GitHub xem sha của mình còn là HEAD không trước khi đăng comment.
+PR_REVIEW_SHA="$sha" setsid bash "$SELF" --job "$repo" "$pr" "$claim" \
+    >>"$LOG" 2>&1 </dev/null &
 
 silent

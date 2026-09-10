@@ -91,6 +91,10 @@ def fake_cli(path, runs_log, exit_code=0, sleep=0):
 
 def fire(state, cli, body):
     """Gọi hook, trả (stdout, số giây chạy, mã thoát)."""
+    Path(state).mkdir(parents=True, exist_ok=True)
+    allow = Path(state) / "repos.allow"
+    if not allow.exists():
+        allow.write_text("acme/widgets\n")
     env = {**os.environ, "PR_REVIEW_STATE": str(state), "PR_REVIEW_CLI": str(cli)}
     t0 = time.time()
     p = subprocess.run(
@@ -118,7 +122,6 @@ def test_hook():
         state = tmp / "state"
         log = tmp / "runs.log"
         cli = tmp / "fake-cli"
-        guard = state / "acme_widgets#7.current"
         claim = lambda sha: state / f"acme_widgets#7@{sha}.claim"
 
         # --- job thành công -------------------------------------------------
@@ -168,38 +171,61 @@ def test_hook():
         time.sleep(1.0)
         assert len(runs(log)) == 4, "redeliver chạy lại -> sẽ đẻ comment hỏng trùng"
 
-        # --- push mới -> file mốc trỏ sang sha mới (huỷ hợp tác) ------------
+        # --- push mới -> job mới chạy, sha của mình đi kèm qua env ----------
         fake_cli(cli, log, sleep=2)
         fire(state, cli, payload(sha40("ddd")))
-        assert wait_for(lambda: guard.read_text().strip() == sha40("ddd"))
+        assert wait_for(lambda: len(runs(log)) == 5)
         fire(state, cli, payload(sha40("eee")))
         assert wait_for(lambda: len(runs(log)) == 6), "job mới không chạy"
-        assert guard.read_text().strip() == sha40("eee"), (
-            "file mốc không trỏ sang sha mới -> job cũ vẫn sẽ đăng review lỗi thời"
-        )
         assert claim(sha40("eee")).exists(), "claim của sha mới bị nhả nhầm"
+
+        # --- repo ngoài allowlist -> từ chối --------------------------------
+        outside = json.dumps({
+            "action": "opened", "number": 7,
+            "repository": {"full_name": "ke-tan-cong/repo"},
+            "pull_request": {"head": {"sha": sha40("c")}},
+        })
+        before = len(runs(log))
+        assert fire(state, cli, outside)[0] == "[SILENT]"
+        time.sleep(1.0)
+        assert len(runs(log)) == before, "repo ngoài allowlist vẫn chạy được"
+        assert not list(state.glob("ke-tan-cong*")), "repo lạ tạo được claim"
     print("ok  hook (validate input, claim atomic, mã thoát, huỷ hợp tác, thoát ngay)")
 
 
 def test_stale():
-    """Job của sha cũ phải tự bỏ qua bước đăng comment."""
-    from pr_review import stale
+    """Job của sha cũ phải tự bỏ qua bước đăng comment.
 
-    with tempfile.TemporaryDirectory() as tmp:
-        guard = Path(tmp) / "current"
-        guard.write_text("sha-moi\n")
-        keep = dict(os.environ)
-        try:
-            os.environ.update(PR_REVIEW_GUARD=str(guard), PR_REVIEW_SHA="sha-cu")
-            assert stale() is True, "sha cũ phải bị coi là lỗi thời"
-            os.environ["PR_REVIEW_SHA"] = "sha-moi"
-            assert stale() is False, "sha mới nhất không được coi là lỗi thời"
-            os.environ.pop("PR_REVIEW_GUARD")
-            assert stale() is False, "chạy tay (không có mốc) không được coi là lỗi thời"
-        finally:
-            os.environ.clear()
-            os.environ.update(keep)
-    print("ok  stale (huỷ hợp tác theo file mốc)")
+    Nguồn sự thật là HEAD trên GitHub — delivery của GitHub không đảm bảo thứ
+    tự nên file mốc cục bộ có thể giữ sha cũ và chặn nhầm job mới nhất.
+    """
+    import pr_review
+
+    keep = dict(os.environ)
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return fake_run.head
+
+    real_run = pr_review.run
+    try:
+        pr_review.run = fake_run
+        os.environ["PR_REVIEW_SHA"] = "sha-cu"
+        fake_run.head = "sha-moi\n"
+        assert pr_review.stale("a/b", "1") is True, "sha cũ phải bị coi là lỗi thời"
+        fake_run.head = "sha-cu\n"
+        assert pr_review.stale("a/b", "1") is False, "HEAD trùng sha thì không lỗi thời"
+        fake_run.head = None
+        assert pr_review.stale("a/b", "1") is False, "hỏi GitHub lỗi -> vẫn đăng, thà trùng còn hơn mất"
+        os.environ.pop("PR_REVIEW_SHA")
+        assert pr_review.stale("a/b", "1") is False, "chạy tay không được coi là lỗi thời"
+        assert all("headRefOid" in a for a in calls), "phải hỏi HEAD thật của PR"
+    finally:
+        pr_review.run = real_run
+        os.environ.clear()
+        os.environ.update(keep)
+    print("ok  stale (hỏi HEAD trên GitHub, không tin file mốc cục bộ)")
 
 
 def test_tool_fence():
@@ -222,6 +248,11 @@ def test_tool_fence():
              *CLAUDE_ARGS],
             capture_output=True, text=True, cwd=tmp, env=CLAUDE_ENV, timeout=180,
         )
+    assert r.returncode == 0, (
+        f"claude thoát {r.returncode} với {CLAUDE_ARGS} — cờ cách ly có thể đã "
+        f"đổi trong bản đang cài. stderr: {r.stderr.strip()[:300]}"
+    )
+    assert r.stdout.strip(), "claude không trả về gì — test canary sẽ pass giả"
     assert token not in r.stdout, (
         "HÀNG RÀO TOOL THỦNG: phiên review đọc được file trên đĩa. "
         f"Kiểm lại {CLAUDE_ARGS} với bản claude đang cài."

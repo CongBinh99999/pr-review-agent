@@ -8,6 +8,7 @@ Chỉ dùng stdlib + hai CLI có sẵn: `gh` và `claude`.
 
 import os
 import pwd
+import re
 import subprocess
 import sys
 import tempfile
@@ -129,7 +130,7 @@ def fence(diff):
     return nonce, f"BEGIN DIFF {nonce}\n{diff}\nEND DIFF {nonce}\n"
 
 
-def run(argv, stdin=None, timeout=GH_TIMEOUT, cwd=None, env=None):
+def run(argv, *, env, stdin=None, timeout=GH_TIMEOUT, cwd=None):
     """Chạy lệnh, trả stdout hoặc None nếu lỗi/timeout."""
     try:
         p = subprocess.run(
@@ -139,7 +140,7 @@ def run(argv, stdin=None, timeout=GH_TIMEOUT, cwd=None, env=None):
             text=True,
             timeout=timeout,
             cwd=cwd,
-            env=env or GH_ENV,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         log(f"TIMEOUT {timeout}s: {' '.join(argv[:3])}")
@@ -153,21 +154,22 @@ def run(argv, stdin=None, timeout=GH_TIMEOUT, cwd=None, env=None):
     return p.stdout
 
 
-def stale():
+def stale(repo, pr):
     """True nếu PR đã có commit mới hơn sha mà job này đang review.
 
-    Huỷ hợp tác thay cho `kill`: hook chỉ ghi sha mới nhất vào file mốc, job cũ
-    tự thấy mình lỗi thời và không đăng comment. Không còn pidfile, không còn
-    `kill -TERM -- -<pgid>` bắn nhầm process group khi PID bị OS cấp lại.
+    Huỷ hợp tác thay cho `kill`: job cũ tự thấy mình lỗi thời và không đăng
+    comment. Nguồn sự thật là HEAD trên GitHub, không phải file mốc cục bộ —
+    delivery của GitHub không đảm bảo thứ tự, nên "sha của delivery cuối" có
+    thể là sha cũ và sẽ chặn nhầm job của commit mới nhất.
     """
-    guard, sha = os.environ.get("PR_REVIEW_GUARD"), os.environ.get("PR_REVIEW_SHA")
-    if not guard or not sha:
-        return False
-    try:
-        with open(guard) as f:
-            return f.read().strip() != sha
-    except OSError:
-        return False
+    sha = os.environ.get("PR_REVIEW_SHA")
+    if not sha:
+        return False  # chạy tay
+    head = run(["gh", "pr", "view", pr, "--repo", repo, "--json", "headRefOid",
+                "-q", ".headRefOid"], env=GH_ENV, timeout=30)
+    if head is None:
+        return False  # không hỏi được thì cứ đăng, thà trùng còn hơn mất
+    return head.strip() != sha
 
 
 def fail(repo, pr, why):
@@ -178,8 +180,12 @@ def fail(repo, pr, why):
     False để hook nhả claim, còn hơn vừa im lặng vừa khoá luôn PR.
     """
     log(f"HỎNG: {why}")
+    if stale(repo, pr):
+        log("BỎ QUA: PR đã có commit mới hơn, không báo hỏng cho sha cũ")
+        return True
     return run(
         ["gh", "pr", "comment", pr, "--repo", repo, "--body-file", "-"],
+        env=GH_ENV,
         stdin=f"⚠️ **Claude Code review không chạy được** — {why}.\n\n"
         "Đẩy thêm một commit để thử lại, hoặc chạy tay: "
         f"`./pr_review.py {repo} {pr}`",
@@ -204,10 +210,10 @@ def main():
     # Thử lại một lần. Không phải để bù cho bug HOME (child_env đã sửa gốc) mà
     # vì `gh` thật sự gặp i/o timeout tới api.github.com — đã xảy ra và lần thử
     # thứ hai cứu được.
-    diff = run(["gh", "pr", "diff", pr, "--repo", repo])
+    diff = run(["gh", "pr", "diff", pr, "--repo", repo], env=GH_ENV)
     if diff is None:
         log("thử lại gh pr diff")
-        diff = run(["gh", "pr", "diff", pr, "--repo", repo])
+        diff = run(["gh", "pr", "diff", pr, "--repo", repo], env=GH_ENV)
     if diff is None:
         # `gh` đang hỏng nên đừng thử comment bằng chính nó. Mã 2 = chưa báo
         # được, hook sẽ nhả claim để lần delivery sau còn chạy lại.
@@ -236,12 +242,16 @@ def main():
     if not review:
         return 1 if fail(repo, pr, "Claude Code trả về rỗng") else 2
 
-    if stale():
-        log("BỎ QUA: đã có sha mới hơn cho PR này, không đăng review cũ")
+    if stale(repo, pr):
+        log("BỎ QUA: PR đã có commit mới hơn, không đăng review lỗi thời")
         return 0
 
     if len(review) > MAX_COMMENT:
         review = review[:MAX_COMMENT] + "\n\n_[... review bị cắt vì quá dài ...]_"
+
+    # Output chịu ảnh hưởng của diff không tin cậy. Bọc @mention lại để một
+    # PR độc hại không biến bot thành máy spam notification.
+    review = re.sub(r"(?<![\w`])@([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)", r"`@\1`", review)
 
     comment = f"🤖 **Claude Code review**\n\n{review}"
     if cut:
@@ -249,6 +259,7 @@ def main():
 
     if run(
         ["gh", "pr", "comment", pr, "--repo", repo, "--body-file", "-"],
+        env=GH_ENV,
         stdin=comment,
     ) is None:
         log("HỎNG: review xong nhưng không đăng được comment")

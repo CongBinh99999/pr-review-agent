@@ -107,7 +107,6 @@ python3 test_pr_review.py                       # self-check
   redeliver không đẻ comment trùng.
 - **`gh` hỏng** → không comment được bằng chính công cụ đang hỏng, nên job nhả
   claim (mã thoát 2) để lần delivery sau chạy lại.
-- **Push mới cho cùng PR** → huỷ job đang chạy, chỉ review sha mới nhất.
 - **Diff > 1500 dòng hoặc > 120k ký tự** → chỉ review phần đầu, comment ghi rõ
   cắt vì lý do nào.
 - **Diff là dữ liệu không tin cậy.** Nó được bọc giữa hai mốc mang nonce ngẫu
@@ -117,8 +116,10 @@ python3 test_pr_review.py                       # self-check
   danh sách biến tối thiểu (token của gateway không đi vào). Đã kiểm bằng file
   mồi: phiên không đọc được file trên đĩa.
 - **`claude -p` quá 15 phút** → job bị giết và comment ⚠️ báo hỏng lên PR.
-- **Push mới khi job cũ đang chạy** → hook ghi sha mới vào file mốc; job cũ tự
-  thấy lỗi thời và bỏ qua bước đăng comment (huỷ hợp tác, không dùng `kill`).
+- **Push mới khi job cũ đang chạy** → job cũ *vẫn chạy hết*, nhưng trước khi
+  đăng comment nó hỏi GitHub xem sha của mình còn là HEAD không; không còn thì
+  im lặng thoát. Huỷ hợp tác, không dùng `kill` — nên không có race pidfile và
+  không bao giờ bắn nhầm process group.
 - **Review quá 60k ký tự** → cắt bớt trước khi đăng, vì GitHub từ chối comment
   dài hơn 65536 ký tự.
 - **PR đóng rồi mở lại** (`reopened`, cùng sha) → bỏ qua: review của sha đó vẫn
@@ -133,8 +134,14 @@ fd, rồi in `[SILENT]` để Hermes bỏ qua event (không kích hoạt agent L
 
 ## Giới hạn đã biết
 
-- **Một repo.** Về kỹ thuật nhiều repo trỏ chung một route thì vẫn chạy (hook
-  đọc `full_name` từ payload), nhưng chưa kiểm và không có giới hạn số job chạy
-  song song — đừng coi là đã hỗ trợ.
+- **Repo phải nằm trong allowlist** `~/.hermes/state/pr-review/repos.allow`
+  (mỗi dòng một `owner/repo`). Fail-closed: file rỗng thì không repo nào được
+  review. Nhiều repo về kỹ thuật chạy được nhưng chưa kiểm và chưa giới hạn số
+  job song song.
+- **`review.log` không tự xoay.** Muốn giới hạn thì dùng logrotate với
+  `copytruncate` — hook không tự cắt vì làm vậy sẽ mất log của job đang chạy.
+- **Phiên review vẫn nhận `HOME` thật** (claude cần nó để đăng nhập), nên
+  `~/.claude` và `~/.config/gh/hosts.yml` nằm trong tầm với *nếu* hàng rào tool
+  thủng. Test canary `test_tool_fence` là thứ canh chuyện đó.
 - Không review inline theo dòng, chỉ một comment tổng.
 - State là file phẳng trong `~/.hermes/state/pr-review/`, mất khi xoá thư mục.
