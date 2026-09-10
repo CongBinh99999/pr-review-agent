@@ -59,6 +59,8 @@ umask 077
 mkdir -p ~/.hermes/state/pr-review
 openssl rand -hex 32 > ~/.hermes/state/pr-review/webhook-secret
 chmod 600 ~/.hermes/state/pr-review/webhook-secret
+# ... dán secret vào GitHub ở bước 4, xong thì:
+# rm ~/.hermes/state/pr-review/webhook-secret
  hermes webhook subscribe pr-review \
     --events pull_request \
     --script pr-review.sh \
@@ -143,10 +145,13 @@ fd, rồi in `[SILENT]` để Hermes bỏ qua event (không kích hoạt agent L
 
 ## Giới hạn đã biết
 
-- **Tối đa 3 job song song** (`PR_REVIEW_MAX_JOBS`). Vượt thì delivery bị bỏ
-  qua và chỉ ghi log — không có hàng đợi.
-- **Không lọc theo tác giả PR.** Ai mở được PR trên repo trong allowlist là
-  kích hoạt được một phiên `claude -p` chạy bằng credential của bạn.
+- **Tối đa ~3 job song song** (`PR_REVIEW_MAX_JOBS`). Xấp xỉ, không phải trần
+  cứng: nhiều delivery cùng lúc có thể cùng lùi. Vượt thì bỏ qua và ghi log —
+  không có hàng đợi.
+- **Chỉ review PR của OWNER / MEMBER / COLLABORATOR** (`author_association`).
+  Đặt `PR_REVIEW_TRUSTED_ONLY=0` để review cả PR từ người ngoài — chỉ làm vậy
+  nếu bạn tin vào hàng rào tool, vì khi đó bất kỳ ai fork cũng kích được một
+  phiên `claude -p` chạy bằng credential của bạn.
 - **`review.log` không tự xoay.** Muốn giới hạn thì dùng logrotate với
   `copytruncate` — hook không tự cắt vì làm vậy sẽ mất log của job đang chạy.
 - **`--canary` phải chạy trước mỗi lần deploy.** Nó là thứ duy nhất chứng minh

@@ -168,12 +168,16 @@ def defang(text):
     model in ra @mention hoặc #123 / owner/repo#123, và GitHub sẽ bắn thông
     báo hoặc tạo cross-reference dưới danh nghĩa tài khoản người vận hành.
     """
-    text = re.sub(r"(?<![\w`])@([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)", r"`@\1`", text)
-    text = re.sub(r"(?<![\w`/])((?:[A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?#\d+)", r"`\1`", text)
-    text = re.sub(r"(?<![\w`])(GH-\d+)", r"`\1`", text)
-    text = re.sub(
-        r"(?<![`\w])(https?://(?:www\.)?github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+"
-        r"/(?:pull|issues|commit)/\S+)", r"`\1`", text)
+    # Chèn ký tự rộng-0 thay vì bọc backtick: bọc backtick sẽ làm lệch cặp
+    # backtick của một code span có sẵn và thả mention ra ngoài, đúng thứ hàm
+    # này dựng ra để chặn. ZWSP hiển thị y hệt và không làm hỏng markdown.
+    z = "\u200b"
+    text = re.sub(r"(?<![\w])@(?=[A-Za-z0-9])", f"@{z}", text)
+    # Không neo đầu từ: `owner/repo#123` cũng là cross-reference.
+    text = re.sub(r"(?<!&)#(?=\d)", f"#{z}", text)
+    text = re.sub(r"(?<![\w])GH-(?=\d)", f"GH-{z}", text)
+    text = re.sub(r"(github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/)(pull|issues|commit)/",
+                  rf"\1{z}\2/", text)
     return text
 
 
@@ -222,7 +226,8 @@ def main():
     if len(sys.argv) != 3:
         sys.exit("usage: pr_review.py <owner/repo> <pr_number>")
     repo = sys.argv[1]
-    if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repo):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*", repo) \
+            or ".." in repo or repo.endswith(".git"):
         sys.exit(f"repo phải dạng owner/repo, nhận: {repo!r}")
     try:
         n = int(sys.argv[2])
@@ -235,13 +240,9 @@ def main():
     started = time.time()
     log(f"BẮT ĐẦU repo={repo} pr={pr} home={GH_ENV['HOME']}")
 
-    # Thử lại một lần. Không phải để bù cho bug HOME (child_env đã sửa gốc) mà
-    # vì `gh` thật sự gặp i/o timeout tới api.github.com — đã xảy ra và lần thử
-    # thứ hai cứu được.
+    # Không retry ở đây: hook đã thử lại toàn bộ job 3 lần khi gặp mã 2. Retry
+    # hai tầng thành 6 lần fetch và 3 phiên claude 15 phút cho cùng một sha.
     diff = run(["gh", "pr", "diff", pr, "--repo", repo], env=GH_ENV)
-    if diff is None:
-        log("thử lại gh pr diff")
-        diff = run(["gh", "pr", "diff", pr, "--repo", repo], env=GH_ENV)
     if diff is None:
         # `gh` đang hỏng nên đừng thử comment bằng chính nó. Mã 2 = chưa báo
         # được, hook sẽ nhả claim để lần delivery sau còn chạy lại.

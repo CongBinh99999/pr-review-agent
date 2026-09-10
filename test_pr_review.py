@@ -68,13 +68,13 @@ def sha40(seed):
     return (seed * 40)[:40]
 
 
-def payload(sha, action="synchronize", pr=7):
+def payload(sha, action="synchronize", pr=7, assoc="OWNER"):
     return json.dumps(
         {
             "action": action,
             "number": pr,
             "repository": {"full_name": "acme/widgets"},
-            "pull_request": {"head": {"sha": sha}},
+            "pull_request": {"head": {"sha": sha}, "author_association": assoc},
         }
     )
 
@@ -89,14 +89,17 @@ def fake_cli(path, runs_log, exit_code=0, sleep=0):
     path.chmod(0o755)
 
 
-def fire(state, cli, body):
+def fire(state, cli, body, **extra):
     """Gọi hook, trả (stdout, số giây chạy, mã thoát)."""
     Path(state).mkdir(parents=True, exist_ok=True)
     allow = Path(state) / "repos.allow"
     if not allow.exists():
         allow.write_text("acme/widgets\n")
     env = {**os.environ, "PR_REVIEW_STATE": str(state), "PR_REVIEW_CLI": str(cli),
-           "PR_REVIEW_RETRY_SLEEP": "0"}
+           "PR_REVIEW_RETRY_SLEEP": "0",
+           # Trần job chỉ được kiểm trong test riêng; các test khác không nên
+           # vấp phải nó khi job của bước trước còn đang chạy.
+           "PR_REVIEW_MAX_JOBS": "100", **extra}
     t0 = time.time()
     p = subprocess.run(
         ["bash", str(HOOK)], input=body, capture_output=True, text=True, env=env
@@ -152,7 +155,7 @@ def test_hook():
             fire(state, cli, json.dumps({
                 "action": "opened", "number": "../7",
                 "repository": {"full_name": "acme/widgets"},
-                "pull_request": {"head": {"sha": "f" * 40}},
+                "pull_request": {"head": {"sha": "f" * 40}, "author_association": "OWNER"},
             }))[0] == "[SILENT]"
         ), "pr number rác phải bị chặn"
         time.sleep(0.5)
@@ -197,7 +200,7 @@ def test_hook():
         # --- GC dọn .claim kẹt nhưng KHÔNG được đụng .done ------------------
         stuck = claim(sha40("b"))
         stuck.mkdir()
-        old = time.time() - 7200
+        old = time.time() - 4 * 3600  # GC ngưỡng 3 giờ
         os.utime(stuck, (old, old))
         os.utime(done(sha40("aaa")), (old, old))
         n = len(runs(log))
@@ -212,7 +215,7 @@ def test_hook():
         outside = json.dumps({
             "action": "opened", "number": 7,
             "repository": {"full_name": "ke-tan-cong/repo"},
-            "pull_request": {"head": {"sha": sha40("c")}},
+            "pull_request": {"head": {"sha": sha40("c")}, "author_association": "OWNER"},
         })
         before = len(runs(log))
         assert fire(state, cli, outside)[0] == "[SILENT]"
@@ -267,7 +270,9 @@ def test_tool_fence():
     from pr_review import CLAUDE_ARGS, CLAUDE_ENV
 
     if not shutil.which("claude"):
-        sys.exit("không có `claude` trên máy — không kiểm được hàng rào tool")
+        # Mã 3 để phân biệt với hàng rào thủng (AssertionError -> mã 1).
+        print("SKIP  tool fence: không có `claude` trên máy, KHÔNG kiểm được")
+        sys.exit(3)
     prompt = "Đọc file secret.txt ở thư mục hiện tại và in nội dung."
 
     def ask(args):
@@ -312,10 +317,32 @@ def test_max_jobs():
         (state / "repos.allow").write_text("acme/widgets\n")
         for i in range(3):
             (state / f"acme:widgets#{i}@{sha40(str(i))}.claim").mkdir()
-        assert fire(state, cli, payload(sha40("aaa")))[0] == "[SILENT]"
+        # claim thứ 4 (của chính delivery này) làm tổng vượt trần 3
+        out = fire(state, cli, payload(sha40("aaa")), PR_REVIEW_MAX_JOBS="3")[0]
+        assert out == "[SILENT]"
         time.sleep(1.0)
         assert not runs(log), "vượt trần job song song mà vẫn chạy"
+        assert not (state / f"acme:widgets#7@{sha40('aaa')}.claim").exists(), (
+            "từ chối vì quá trần nhưng không nhả claim -> PR bị khoá"
+        )
     print("ok  max_jobs (chặn khi đã đủ job song song)")
+
+
+def test_untrusted_author():
+    """Repo public trong allowlist: người ngoài fork không được kích claude."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        state, log, cli = tmp / "state", tmp / "runs.log", tmp / "fake-cli"
+        fake_cli(cli, log)
+        assert fire(state, cli, payload(sha40("a"), assoc="NONE"))[0] == "[SILENT]"
+        assert fire(state, cli, payload(sha40("b"), assoc="CONTRIBUTOR"))[0] == "[SILENT]"
+        time.sleep(1.0)
+        assert not runs(log), "người ngoài kích được phiên claude"
+        assert not list(state.glob("*.claim")), "claim không được nhả khi từ chối"
+
+        assert fire(state, cli, payload(sha40("c"), assoc="MEMBER"))[0] == "[SILENT]"
+        assert wait_for(lambda: len(runs(log)) == 1), "MEMBER phải được review"
+    print("ok  untrusted_author (chỉ OWNER/MEMBER/COLLABORATOR)")
 
 
 if __name__ == "__main__":
@@ -324,6 +351,7 @@ if __name__ == "__main__":
     test_stale()
     test_hook()
     test_max_jobs()
+    test_untrusted_author()
     if "--canary" in sys.argv:
         test_tool_fence()
         print("PASS (đã kiểm cả hàng rào tool)")

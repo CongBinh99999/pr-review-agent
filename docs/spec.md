@@ -11,18 +11,11 @@ trên GitHub → Claude Code phân tích diff → review xuất hiện thành co
 Hermes gateway (đã chạy sẵn trên máy) làm cửa nhận webhook. Claude Code làm
 reviewer. Không dựng service HTTP riêng.
 
-```
-GitHub PR event
-      ↓
-hermes :8644/webhooks/pr-review     verify X-Hub-Signature-256, lọc events=pull_request
-      ↓
-scripts/hermes-hook.sh              lọc action, chống trùng, setsid tách nền, in [SILENT]
-      ↓  (ngoài request path)
-pr_review.py                        gh pr diff → cắt bớt → claude -p → gh pr comment
-```
+Sơ đồ luồng và bảng hành vi chi tiết nằm ở [`../README.md`](../README.md) —
+không chép lại ở đây để hai file khỏi lệch nhau.
 
-`[SILENT]` khiến Hermes bỏ qua event sau khi script chạy xong — **không agent
-LLM nào của Hermes được kích hoạt**. Hermes thuần là transport.
+Điểm cốt lõi: `[SILENT]` khiến Hermes bỏ qua event sau khi script chạy xong nên
+**không agent LLM nào của Hermes được kích hoạt**. Hermes thuần là transport.
 
 ### Vì sao không tự viết service webhook
 
