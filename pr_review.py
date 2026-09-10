@@ -170,6 +170,10 @@ def defang(text):
     """
     text = re.sub(r"(?<![\w`])@([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)", r"`@\1`", text)
     text = re.sub(r"(?<![\w`/])((?:[A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?#\d+)", r"`\1`", text)
+    text = re.sub(r"(?<![\w`])(GH-\d+)", r"`\1`", text)
+    text = re.sub(
+        r"(?<![`\w])(https?://(?:www\.)?github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+"
+        r"/(?:pull|issues|commit)/\S+)", r"`\1`", text)
     return text
 
 
@@ -188,7 +192,10 @@ def stale(repo, pr):
                 "-q", ".headRefOid"], env=GH_ENV, timeout=30)
     if head is None:
         return False  # không hỏi được thì cứ đăng, thà trùng còn hơn mất
-    return head.strip() != sha
+    head = head.strip()
+    # So sánh prefix: payload có thể mang short sha, repo sha256 cho 64 ký tự.
+    # So tuyệt đối thì stale() luôn True và job im lặng vứt review sau 15 phút.
+    return not (head.startswith(sha) or sha.startswith(head))
 
 
 def fail(repo, pr, why):
@@ -269,9 +276,9 @@ def main():
 
     comment = f"{HEADER}{defang(review)}"
     if len(comment) > MAX_COMMENT:
-        # Cắt SAU khi escape: escape làm dài thêm, cắt trước là vẫn có thể vượt
-        # trần 65536 của GitHub rồi bị 422 và mất trắng cả lần review.
-        comment = comment[:MAX_COMMENT] + TRUNCATED
+        # Cắt SAU khi escape (escape làm dài thêm) và cắt ở ranh giới dòng —
+        # cắt giữa cặp backtick của defang là mention sống lại đúng lúc cuối.
+        comment = comment[:MAX_COMMENT].rsplit("\n", 1)[0] + TRUNCATED
     if cut:
         comment += f"\n\n---\n_Diff {cut} — chỉ phần đầu được review._"
 

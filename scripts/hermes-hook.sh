@@ -15,8 +15,14 @@ CLI="${PR_REVIEW_CLI:-$SELF_DIR/../pr_review.py}"
 # --- chế độ job: chạy trong tiến trình nền đã tách khỏi Hermes ---------------
 if [ "${1:-}" = "--job" ]; then
     repo=$2 pr=$3 claim=$4
-    "$CLI" "$repo" "$pr"
-    rc=$?
+    # Hook đã trả 200 cho GitHub TRƯỚC khi job chạy, nên GitHub không có lý do
+    # gì để redeliver. Muốn có retry thì phải tự làm ở đây.
+    for attempt in 1 2 3; do
+        "$CLI" "$repo" "$pr"
+        rc=$?
+        [ $rc -ne 2 ] && break
+        [ $attempt -lt 3 ] && sleep $((attempt * ${PR_REVIEW_RETRY_SLEEP:-30}))
+    done
     # 0 = xong, 1 = đã báo hỏng lên PR. Cả hai đều "đã xử lý xong sha này":
     # đổi .claim -> .done để chống trùng vĩnh viễn, GC không đụng tới.
     # 2 = chưa báo được (gh chết) -> nhả claim cho delivery sau chạy lại.
@@ -78,7 +84,15 @@ fi
 # review thứ hai cho đúng sha cũ.
 find "$STATE" -maxdepth 1 -name '*.claim' -type d -mmin +60 -exec rmdir {} + 2>/dev/null
 
-key="${repo//\//_}#$pr"
+# `:` không hợp lệ trong tên repo GitHub nên không thể đụng nhau.
+running=$(find "$STATE" -maxdepth 1 -name '*.claim' -type d 2>/dev/null | wc -l)
+if [ "$running" -ge "${PR_REVIEW_MAX_JOBS:-3}" ]; then
+    note "TỪ CHỐI: đã có $running job đang chạy"
+    silent
+fi
+
+# `:` không hợp lệ trong tên repo GitHub nên không thể đụng nhau.
+key="${repo/\//:}#$pr"
 claim="$STATE/$key@$sha.claim"
 
 # Sha đã xử lý xong rồi thì thôi, vĩnh viễn. `reopened` và nút Redeliver của

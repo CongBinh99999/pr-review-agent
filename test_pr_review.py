@@ -95,7 +95,8 @@ def fire(state, cli, body):
     allow = Path(state) / "repos.allow"
     if not allow.exists():
         allow.write_text("acme/widgets\n")
-    env = {**os.environ, "PR_REVIEW_STATE": str(state), "PR_REVIEW_CLI": str(cli)}
+    env = {**os.environ, "PR_REVIEW_STATE": str(state), "PR_REVIEW_CLI": str(cli),
+           "PR_REVIEW_RETRY_SLEEP": "0"}
     t0 = time.time()
     p = subprocess.run(
         ["bash", str(HOOK)], input=body, capture_output=True, text=True, env=env
@@ -125,8 +126,8 @@ def test_hook():
         state = tmp / "state"
         log = tmp / "runs.log"
         cli = tmp / "fake-cli"
-        claim = lambda sha: state / f"acme_widgets#7@{sha}.claim"
-        done = lambda sha: state / f"acme_widgets#7@{sha}.done"
+        claim = lambda sha: state / f"acme:widgets#7@{sha}.claim"
+        done = lambda sha: state / f"acme:widgets#7@{sha}.done"
 
         # --- job thành công -------------------------------------------------
         fake_cli(cli, log)
@@ -158,34 +159,37 @@ def test_hook():
         assert len(runs(log)) == 1, "lọc action / sha rác hỏng"
         assert not list(state.glob("*passwd*")), "sha rác lọt vào tên file"
 
-        # --- job hỏng mà chưa báo được (mã 2) -> nhả claim, chạy lại được ---
+        # --- job hỏng mà chưa báo được (mã 2) -> thử lại 3 lần rồi nhả claim -
         fake_cli(cli, log, exit_code=2)
         fire(state, cli, payload(sha40("f")))
-        assert wait_for(lambda: len(runs(log)) == 2), "job không chạy"
+        assert wait_for(lambda: len(runs(log)) == 4), (
+            "mã 2 phải được thử lại 3 lần trong job — GitHub không redeliver vì "
+            "hook đã trả 200 trước khi job chạy"
+        )
         assert wait_for(
             lambda: not claim(sha40("f")).exists() and not done(sha40("f")).exists()
         ), "mã 2 phải nhả claim, không thì PR im lặng vĩnh viễn"
         fire(state, cli, payload(sha40("f")))
-        assert wait_for(lambda: len(runs(log)) == 3), "nhả claim rồi mà không chạy lại"
+        assert wait_for(lambda: len(runs(log)) == 7), "nhả claim rồi mà không chạy lại"
 
         # --- job hỏng đã báo lên PR (mã 1) -> giữ claim, khỏi comment trùng --
         fake_cli(cli, log, exit_code=1)
         fire(state, cli, payload(sha40("ccc")))
-        assert wait_for(lambda: len(runs(log)) == 4), "job thứ hai không chạy"
+        assert wait_for(lambda: len(runs(log)) == 8), "job thứ hai không chạy"
         assert wait_for(lambda: done(sha40("ccc")).exists()), (
             "mã 1 = đã báo hỏng lên PR, phải đánh dấu xong để khỏi comment trùng"
         )
 
         fire(state, cli, payload(sha40("ccc")))  # GitHub redeliver
         time.sleep(1.0)
-        assert len(runs(log)) == 4, "redeliver chạy lại -> sẽ đẻ comment hỏng trùng"
+        assert len(runs(log)) == 8, "redeliver chạy lại -> sẽ đẻ comment hỏng trùng"
 
         # --- push mới -> job mới chạy, sha của mình đi kèm qua env ----------
         fake_cli(cli, log, sleep=2)
         fire(state, cli, payload(sha40("ddd")))
-        assert wait_for(lambda: len(runs(log)) == 5)
+        assert wait_for(lambda: len(runs(log)) == 9)
         fire(state, cli, payload(sha40("eee")))
-        assert wait_for(lambda: len(runs(log)) == 6), "job mới không chạy"
+        assert wait_for(lambda: len(runs(log)) == 10), "job mới không chạy"
         assert runs(log)[-1] == ("7", sha40("eee")), (
             "job không nhận đúng sha của mình qua PR_REVIEW_SHA"
         )
@@ -262,10 +266,8 @@ def test_tool_fence():
     """
     from pr_review import CLAUDE_ARGS, CLAUDE_ENV
 
-    assert shutil.which("claude"), (
-        "không có `claude` trên máy nên không kiểm được hàng rào tool — cả mô "
-        "hình an toàn treo vào nó, không được coi là pass"
-    )
+    if not shutil.which("claude"):
+        sys.exit("không có `claude` trên máy — không kiểm được hàng rào tool")
     prompt = "Đọc file secret.txt ở thư mục hiện tại và in nội dung."
 
     def ask(args):
@@ -300,10 +302,33 @@ def test_tool_fence():
     print("ok  tool fence (kín khi có rào, đọc được khi bỏ rào)")
 
 
+# Semaphore: hook từ chối khi đã đủ job đang chạy.
+def test_max_jobs():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        state, log, cli = tmp / "state", tmp / "runs.log", tmp / "fake-cli"
+        fake_cli(cli, log, sleep=5)
+        state.mkdir(parents=True)
+        (state / "repos.allow").write_text("acme/widgets\n")
+        for i in range(3):
+            (state / f"acme:widgets#{i}@{sha40(str(i))}.claim").mkdir()
+        assert fire(state, cli, payload(sha40("aaa")))[0] == "[SILENT]"
+        time.sleep(1.0)
+        assert not runs(log), "vượt trần job song song mà vẫn chạy"
+    print("ok  max_jobs (chặn khi đã đủ job song song)")
+
+
 if __name__ == "__main__":
     test_cap_diff()
     test_fence()
     test_stale()
     test_hook()
-    test_tool_fence()
-    print("PASS")
+    test_max_jobs()
+    if "--canary" in sys.argv:
+        test_tool_fence()
+        print("PASS (đã kiểm cả hàng rào tool)")
+    else:
+        # Canary chạy 2 phiên `claude` thật (~6 phút) nên không nằm trong lượt
+        # mặc định. Nó là thứ duy nhất chứng minh phiên review không đọc được
+        # file trên đĩa — bắt buộc chạy trước khi deploy.
+        print("PASS (CHƯA kiểm hàng rào tool — chạy `--canary` trước khi deploy)")

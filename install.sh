@@ -11,6 +11,10 @@ SHIM="$HERMES_HOME/scripts/pr-review.sh"
 mkdir -p "$HERMES_HOME/scripts" "$HERMES_HOME/state/pr-review"
 ALLOW="$HERMES_HOME/state/pr-review/repos.allow"
 [ -f "$ALLOW" ] || : > "$ALLOW"
+if [ -e "$SHIM" ] && ! grep -qF "$REPO_DIR/scripts/hermes-hook.sh" "$SHIM"; then
+    cp -p "$SHIM" "$SHIM.bak-$(date +%Y%m%d-%H%M%S)"
+    echo "Đã backup shim cũ (nội dung khác) sang $SHIM.bak-*"
+fi
 printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$REPO_DIR/scripts/hermes-hook.sh" > "$SHIM"
 chmod +x "$SHIM"
 

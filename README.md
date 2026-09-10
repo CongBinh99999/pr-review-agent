@@ -34,7 +34,7 @@ gateway đang chạy. Không có dependency Python nào.
 ./install.sh
 ```
 
-Tạo shim `~/.hermes/scripts/pr-review.sh` trỏ về repo. Sau đó 4 bước thủ công:
+Tạo shim `~/.hermes/scripts/pr-review.sh` trỏ về repo. Sau đó 5 bước thủ công:
 
 **1. Bật webhook platform** — thêm vào `~/.hermes/config.yaml`:
 
@@ -84,6 +84,12 @@ dev — muốn chặt chẽ thì xoay secret khi lên production.
 | Secret | `$SECRET` ở trên |
 | Events | Chỉ `Pull requests` |
 
+**5. Cho phép repo** — fail-closed, file rỗng thì mọi PR bị từ chối:
+
+```bash
+echo "CongBinh99999/pr-review-agent" >> ~/.hermes/state/pr-review/repos.allow
+```
+
 Tunnel cho môi trường dev (`cloudflared` đã có sẵn trên máy):
 
 ```bash
@@ -96,7 +102,8 @@ cloudflared tunnel --url http://localhost:8644
 tail -f ~/.hermes/state/pr-review/review.log   # log job review
 hermes logs -f                                  # log gateway
 hermes webhook list                             # xem route
-python3 test_pr_review.py                       # self-check
+python3 test_pr_review.py                       # self-check nhanh
+python3 test_pr_review.py --canary              # + kiểm hàng rào tool (~6 phút)
 ```
 
 ## Hành vi
@@ -105,8 +112,10 @@ python3 test_pr_review.py                       # self-check
   delivery song song cùng một sha chỉ có một cái chạy.
 - **Claude hỏng** → comment ⚠️ trên PR kèm cách chạy lại; claim giữ nguyên nên
   redeliver không đẻ comment trùng.
-- **`gh` hỏng** → không comment được bằng chính công cụ đang hỏng, nên job nhả
-  claim (mã thoát 2) để lần delivery sau chạy lại.
+- **`gh` hỏng** → không comment được bằng chính công cụ đang hỏng. Job tự thử
+  lại 3 lần (nghỉ 30s rồi 60s); Hermes đã trả 200 cho GitHub trước khi job
+  chạy nên GitHub sẽ không bao giờ redeliver, retry phải nằm trong job. Hết 3
+  lần thì nhả claim: đẩy commit mới hoặc chạy tay để thử lại.
 - **Diff > 1500 dòng hoặc > 120k ký tự** → chỉ review phần đầu, comment ghi rõ
   cắt vì lý do nào.
 - **Diff là dữ liệu không tin cậy.** Nó được bọc giữa hai mốc mang nonce ngẫu
@@ -134,12 +143,16 @@ fd, rồi in `[SILENT]` để Hermes bỏ qua event (không kích hoạt agent L
 
 ## Giới hạn đã biết
 
-- **Repo phải nằm trong allowlist** `~/.hermes/state/pr-review/repos.allow`
-  (mỗi dòng một `owner/repo`). Fail-closed: file rỗng thì không repo nào được
-  review. Nhiều repo về kỹ thuật chạy được nhưng chưa kiểm và chưa giới hạn số
-  job song song.
+- **Tối đa 3 job song song** (`PR_REVIEW_MAX_JOBS`). Vượt thì delivery bị bỏ
+  qua và chỉ ghi log — không có hàng đợi.
+- **Không lọc theo tác giả PR.** Ai mở được PR trên repo trong allowlist là
+  kích hoạt được một phiên `claude -p` chạy bằng credential của bạn.
 - **`review.log` không tự xoay.** Muốn giới hạn thì dùng logrotate với
   `copytruncate` — hook không tự cắt vì làm vậy sẽ mất log của job đang chạy.
+- **`--canary` phải chạy trước mỗi lần deploy.** Nó là thứ duy nhất chứng minh
+  phiên review không đọc được file trên đĩa; bản `claude` mới đổi cờ cách ly là
+  hàng rào thủng âm thầm. Không nằm trong self-check mặc định vì chạy 2 phiên
+  `claude` thật.
 - **Phiên review vẫn nhận `HOME` thật** (claude cần nó để đăng nhập), nên
   `~/.claude` và `~/.config/gh/hosts.yml` nằm trong tầm với *nếu* hàng rào tool
   thủng. Test canary `test_tool_fence` là thứ canh chuyện đó.
