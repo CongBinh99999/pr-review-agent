@@ -22,16 +22,9 @@ CLAUDE_TIMEOUT = 900
 # Diff do người mở PR kiểm soát hoàn toàn, nên phiên review phải không có tool
 # nào. `--restricted` bỏ các tool chạy lệnh và bỏ qua settings của user/project;
 # `--strict-mcp-config` bỏ luôn MCP server đã cấu hình sẵn cho máy này.
-# ponytail: phần --disallowedTools là danh sách chặn, phải rà lại khi Claude Code
-# thêm tool mới. Đổi sang allowlist nếu CLI hỗ trợ.
-CLAUDE_ARGS = [
-    "--restricted",
-    "--strict-mcp-config",
-    "--disallowedTools",
-    "Bash,Read,Write,Edit,NotebookEdit,Glob,Grep,Task,Agent,WebSearch,WebFetch,"
-    "ToolSearch,Workflow,Artifact,SendMessage,PushNotification,DesignSync,"
-    "CronCreate,CronDelete,CronList,EnterWorktree,ExitWorktree,TaskOutput,TaskStop",
-]
+# `--tools ""` là allowlist rỗng: tool mới của Claude Code cũng không lọt vào.
+# Danh sách chặn thì fail-open — thiếu một tên là thủng.
+CLAUDE_ARGS = ["--restricted", "--strict-mcp-config", "--tools", ""]
 
 INSTRUCTIONS = """Bạn là code reviewer. Diff của một pull request nằm ở stdin,
 giữa hai mốc BEGIN DIFF {nonce} và END DIFF {nonce}.
@@ -82,17 +75,27 @@ def cap_diff(diff, max_lines=MAX_DIFF_LINES, max_chars=MAX_DIFF_CHARS):
     thể là vài MB, đủ để claude nuốt trọn rồi treo tới hết timeout.
     """
     lines = diff.splitlines()
-    kept, size = [], 0
+    kept, size, reason = [], 0, None
+
+    if len(lines) > max_lines:
+        reason = f"quá {max_lines} dòng"
+
     for line in lines[:max_lines]:
-        size += len(line) + 1
-        if size > max_chars:
+        if size + len(line) + 1 > max_chars:
+            # Một dòng minified có thể dài hơn cả trần. Cắt ngang nó, đừng trả
+            # về rỗng rồi vẫn đăng comment "đã review".
+            if not kept:
+                kept.append(line[: max_chars - 1])
+            reason = f"quá {max_chars} ký tự"
             break
+        size += len(line) + 1
         kept.append(line)
-    if len(kept) == len(lines):
+
+    if reason is None:
         return diff, None
-    reason = f"quá {max_lines} dòng" if len(kept) == max_lines else f"quá {max_chars} ký tự"
     dropped = len(lines) - len(kept)
-    return "\n".join(kept) + f"\n\n[... đã cắt {dropped} dòng cuối ...]", reason
+    tail = f"\n\n[... đã cắt {dropped} dòng cuối ...]" if dropped else "\n\n[... dòng cuối bị cắt ngang ...]"
+    return "\n".join(kept) + tail, reason
 
 
 def fence(diff):

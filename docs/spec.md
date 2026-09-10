@@ -64,7 +64,9 @@ Viết lại những thứ này bằng FastAPI là làm lại việc đã xong.
 
 - Tự sửa code / tạo commit thay reviewer.
 - Gate merge, required status check.
-- Multi-repo, multi-tenant.
+- Multi-repo, multi-tenant. (Hook đọc `full_name` từ payload nên nhiều repo
+  trỏ chung một route vẫn chạy được, nhưng chưa kiểm và chưa giới hạn số job
+  song song.)
 - Inline comment theo từng dòng — chỉ một comment tổng.
 - MCP server. MCP là giao thức agent *gọi ra*, không nhận được webhook đẩy vào.
   Khi nào cần review on-demand từ phiên chat thì bọc `pr_review.py` thành MCP

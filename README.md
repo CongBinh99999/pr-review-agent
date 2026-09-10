@@ -56,6 +56,7 @@ hermes gateway restart
 
 ```bash
 umask 077
+mkdir -p ~/.hermes/state/pr-review
 openssl rand -hex 32 > ~/.hermes/state/pr-review/webhook-secret
  hermes webhook subscribe pr-review \
     --events pull_request \
@@ -97,8 +98,9 @@ python3 test_pr_review.py                       # self-check
 
 - **Chống trùng** theo `head_sha`, claim tạo bằng `mkdir` nên atomic — hai
   delivery song song cùng một sha chỉ có một cái chạy.
-- **Job hỏng** (gh lỗi, claude timeout, bị kill) → nhả claim, lần redeliver sau
-  của GitHub được xử lý lại.
+- **Job hỏng** (gh lỗi, claude timeout) → comment ⚠️ báo hỏng ngay trên PR kèm
+  cách chạy lại. Claim vẫn giữ, nên GitHub redeliver không đẻ comment trùng;
+  muốn thử lại thì đẩy commit mới hoặc chạy `./pr_review.py` bằng tay.
 - **Push mới cho cùng PR** → huỷ job đang chạy, chỉ review sha mới nhất.
 - **Diff > 1500 dòng hoặc > 120k ký tự** → chỉ review phần đầu, comment ghi rõ
   cắt vì lý do nào.
@@ -118,7 +120,8 @@ fd, rồi in `[SILENT]` để Hermes bỏ qua event (không kích hoạt agent L
 
 ## Giới hạn đã biết
 
-- Nhiều repo dùng chung được một route (hook đọc `full_name` từ payload); mỗi repo
-  chỉ cần thêm webhook trỏ về đúng URL đó.
+- **Một repo.** Về kỹ thuật nhiều repo trỏ chung một route thì vẫn chạy (hook
+  đọc `full_name` từ payload), nhưng chưa kiểm và không có giới hạn số job chạy
+  song song — đừng coi là đã hỗ trợ.
 - Không review inline theo dòng, chỉ một comment tổng.
 - State là file phẳng trong `~/.hermes/state/pr-review/`, mất khi xoá thư mục.
