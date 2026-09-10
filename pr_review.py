@@ -6,12 +6,15 @@
 Chỉ dùng stdlib + hai CLI có sẵn: `gh` và `claude`.
 """
 
+import os
+import pwd
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
 
+GH_TIMEOUT = 60
 MAX_DIFF_LINES = 1500
 MAX_DIFF_CHARS = 120_000
 CLAUDE_TIMEOUT = 900
@@ -49,6 +52,25 @@ Không tóm tắt lại diff, không khen. Mỗi phát hiện 1-3 dòng.
 Nếu không có gì đáng nói, trả lời đúng một dòng: Không thấy vấn đề đáng lưu ý."""
 
 
+def child_env():
+    """Env cho `gh` và `claude`.
+
+    Hermes ghi đè HOME cho tiến trình con (xem `apply_subprocess_home_env`) và
+    cất bản gốc vào HERMES_REAL_HOME. Với HOME sai, `gh` không thấy
+    ~/.config/gh và `claude` không thấy ~/.claude, rồi treo khi phải dò
+    keyring. Lấy lại home thật từ /etc/passwd nên không phụ thuộc biến nào.
+    """
+    home = os.environ.get("HERMES_REAL_HOME") or pwd.getpwuid(os.getuid()).pw_dir
+    return {
+        **os.environ,
+        "HOME": home,
+        "GH_CONFIG_DIR": os.path.join(home, ".config", "gh"),
+        "GH_NO_UPDATE_NOTIFIER": "1",
+        "GH_PROMPT_DISABLED": "1",
+        "NO_COLOR": "1",
+    }
+
+
 def log(msg):
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", file=sys.stderr, flush=True)
 
@@ -83,11 +105,17 @@ def fence(diff):
     return nonce, f"BEGIN DIFF {nonce}\n{diff}\nEND DIFF {nonce}\n"
 
 
-def run(argv, stdin=None, timeout=60, cwd=None):
+def run(argv, stdin=None, timeout=GH_TIMEOUT, cwd=None):
     """Chạy lệnh, trả stdout hoặc None nếu lỗi/timeout."""
     try:
         p = subprocess.run(
-            argv, input=stdin, capture_output=True, text=True, timeout=timeout, cwd=cwd
+            argv,
+            input=stdin,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd,
+            env=child_env(),
         )
     except subprocess.TimeoutExpired:
         log(f"TIMEOUT {timeout}s: {' '.join(argv[:3])}")
@@ -101,6 +129,17 @@ def run(argv, stdin=None, timeout=60, cwd=None):
     return p.stdout
 
 
+def fail(repo, pr, why):
+    """Báo hỏng ngay trên PR. Job chết im lặng là không ai biết PR chưa được review."""
+    log(f"HỎNG: {why}")
+    run(
+        ["gh", "pr", "comment", pr, "--repo", repo, "--body-file", "-"],
+        stdin=f"⚠️ **Claude Code review không chạy được** — {why}.\n\n"
+        "Đẩy thêm một commit để thử lại, hoặc chạy tay: "
+        f"`./pr_review.py {repo} {pr}`",
+    )
+
+
 def main():
     if len(sys.argv) != 3:
         sys.exit("usage: pr_review.py <owner/repo> <pr_number>")
@@ -111,10 +150,15 @@ def main():
         sys.exit(f"pr_number phải là số nguyên, nhận: {sys.argv[2]!r}")
 
     started = time.time()
-    log(f"BẮT ĐẦU repo={repo} pr={pr}")
+    log(f"BẮT ĐẦU repo={repo} pr={pr} home={child_env()['HOME']}")
 
-    diff = run(["gh", "pr", "diff", pr, "--repo", repo], timeout=120)
+    # Thử lại một lần: lần treo 120s ở PR #2 là do gh dò keyring dưới HOME sai.
+    diff = run(["gh", "pr", "diff", pr, "--repo", repo])
     if diff is None:
+        log("thử lại gh pr diff")
+        diff = run(["gh", "pr", "diff", pr, "--repo", repo])
+    if diff is None:
+        fail(repo, pr, "không lấy được diff của PR (gh pr diff lỗi hoặc quá hạn)")
         return 1
     if not diff.strip():
         log("BỎ QUA: diff rỗng")
@@ -133,10 +177,11 @@ def main():
             cwd=empty,
         )
     if review is None:
+        fail(repo, pr, "Claude Code không trả về được review (lỗi hoặc quá hạn)")
         return 1
     review = review.strip()
     if not review:
-        log("LỖI: claude trả về rỗng")
+        fail(repo, pr, "Claude Code trả về rỗng")
         return 1
 
     comment = f"🤖 **Claude Code review**\n\n{review}"

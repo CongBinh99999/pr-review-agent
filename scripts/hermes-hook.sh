@@ -44,6 +44,10 @@ case $sha in *[!0-9a-fA-F]* | "") silent ;; esac
 
 mkdir -p "$STATE"
 find "$STATE" -maxdepth 1 -name '*.claim' -type d -mtime +30 -exec rmdir {} + 2>/dev/null
+# ponytail: cắt log khi quá 5MB thay vì logrotate. Mất phần cũ, đủ cho debug.
+if [ -f "$LOG" ] && [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt 5242880 ]; then
+    tail -c 1048576 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+fi
 
 key="${repo//\//_}#$pr"
 claim="$STATE/$key@$sha.claim"
