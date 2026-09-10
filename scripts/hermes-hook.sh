@@ -14,18 +14,12 @@ CLI="${PR_REVIEW_CLI:-$SELF_DIR/../pr_review.py}"
 
 # --- chế độ job: chạy trong tiến trình nền đã tách khỏi Hermes ---------------
 if [ "${1:-}" = "--job" ]; then
-    repo=$2 pr=$3 pidfile=$4 claim=$5
-    # $$ ở đây luôn là PGID: setsid làm tiến trình này thành session leader,
-    # dù nó có fork hay exec thẳng. Ghi từ bên trong job nên không đoán mò.
-    echo $$ > "$pidfile"
+    repo=$2 pr=$3 claim=$4
     "$CLI" "$repo" "$pr"
     # Mã 2 = hỏng mà chưa báo được lên PR (thường là `gh` chết). Nhả claim để
     # delivery sau còn chạy lại. Mã 1 = đã có comment ⚠️ trên PR, giữ claim
     # nên redeliver không đẻ comment trùng.
     [ $? -eq 2 ] && rmdir "$claim" 2>/dev/null
-    # Chỉ xoá nếu pidfile vẫn là của mình. Job mới có thể đã ghi đè khi push
-    # dồn dập — xoá bừa là job kế tiếp mất đường huỷ nó.
-    [ "$(cat "$pidfile" 2>/dev/null)" = "$$" ] && rm -f "$pidfile"
     exit 0
 fi
 
@@ -34,6 +28,7 @@ STATE="${PR_REVIEW_STATE:-${HERMES_HOME:-$HOME/.hermes}/state/pr-review}"
 LOG="$STATE/review.log"
 
 silent() { echo "[SILENT]"; exit 0; }
+note()   { echo "[$(date '+%F %T')] $*" >> "$LOG"; }
 
 fields=$(python3 -c '
 import json, re, sys
@@ -46,48 +41,51 @@ if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repo):
 sha = d["pull_request"]["head"]["sha"]
 if not re.fullmatch(r"[0-9a-fA-F]{7,64}", sha):
     sys.exit(1)
-print(repo, int(d["number"]), sha, d["action"])
+pr = int(d["number"])
+if pr <= 0:
+    sys.exit(1)
+print(repo, pr, sha)
 ') || silent
-read -r repo pr sha action <<<"$fields"
+read -r repo pr sha <<<"$fields"
 
-mkdir -p "$STATE"
-find "$STATE" -maxdepth 1 -name '*.claim' -type d -mtime +30 -exec rmdir {} + 2>/dev/null
-
-# Xoay log giữ nguyên inode: job đang chạy vẫn giữ fd `>>` trỏ vào file này,
-# `mv` sẽ làm mọi dòng log sau đó của nó biến mất.
-if [ -f "$LOG" ] && [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt 5242880 ]; then
-    tmp=$(mktemp "$STATE/.log.XXXXXX") &&
-        tail -c 1048576 "$LOG" > "$tmp" && cat "$tmp" > "$LOG" && rm -f "$tmp"
-fi
+mkdir -p "$STATE" || silent
 
 if [ ! -x "$CLI" ]; then
-    echo "[$(date '+%F %T')] HỎNG: không chạy được $CLI" >> "$LOG"
-    silent
+    # Không `silent`: thoát khác 0 để Hermes ghi vào log gateway, chứ không
+    # nuốt lỗi cài đặt rồi im lặng bỏ qua mọi PR.
+    note "HỎNG: không chạy được $CLI"
+    echo "pr-review: CLI không chạy được: $CLI" >&2
+    exit 1
+fi
+
+find "$STATE" -maxdepth 1 -name '*.claim' -type d -mtime +30 -exec rmdir {} + 2>/dev/null
+
+# Xoay log chỉ khi không có job nào đang giữ fd, nếu không job đó mất log.
+if [ -f "$LOG" ] && [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt 5242880 ] &&
+   ! pgrep -f "hermes-hook.sh --job" >/dev/null 2>&1; then
+    tmp=$(mktemp "$STATE/.log.XXXXXX")
+    if [ -n "${tmp:-}" ]; then
+        tail -c 1048576 "$LOG" > "$tmp" && mv "$tmp" "$LOG"
+        rm -f "$tmp"
+    fi
 fi
 
 key="${repo//\//_}#$pr"
 claim="$STATE/$key@$sha.claim"
-pidfile="$STATE/$key.pid"
+guard="$STATE/$key.current"
 
 # Claim theo từng sha, tạo bằng mkdir nên atomic: hai delivery song song cùng
-# một sha thì chỉ một cái vào được. Job hỏng KHÔNG nhả claim — pr_review.py đã
-# comment báo hỏng lên PR, nhả ra chỉ đẻ thêm comment trùng. Muốn thử lại thì
-# đẩy commit mới (sha mới) hoặc chạy tay.
-# `reopened` thường mang đúng sha cũ nên claim đã tồn tại. Không nhả claim
-# trước thì action này vĩnh viễn không xử lý được.
-[ "$action" = reopened ] && rmdir "$claim" 2>/dev/null
+# một sha thì chỉ một cái vào được. `reopened` mang đúng sha cũ nên sẽ bị chặn
+# ở đây — đúng ý: review của sha đó vẫn còn nguyên trên PR, không cần làm lại.
 mkdir "$claim" 2>/dev/null || silent
 
-# Push mới cho cùng PR: huỷ job cũ, chỉ review sha mới nhất.
-if [ -f "$pidfile" ]; then
-    old=$(cat "$pidfile" 2>/dev/null)
-    # PID bị OS cấp lại thì pidfile mồ côi trỏ vào process group của người
-    # khác. Đối chiếu cmdline trước khi bắn TERM.
-    if [ -n "$old" ] && grep -qa "hermes-hook" "/proc/$old/cmdline" 2>/dev/null; then
-        kill -TERM -- "-$old" 2>/dev/null
-    fi
-fi
+# Huỷ hợp tác: ghi sha mới nhất vào file mốc (atomic bằng mv). Job của sha cũ
+# tự thấy mình lỗi thời và bỏ qua bước đăng comment. Không dùng kill nên không
+# có race pidfile, không có chuyện bắn nhầm process group khi PID bị cấp lại.
+tmp=$(mktemp "$STATE/.cur.XXXXXX") && printf '%s\n' "$sha" > "$tmp" &&
+    mv "$tmp" "$guard"
 
-setsid bash "$SELF" --job "$repo" "$pr" "$pidfile" "$claim" >>"$LOG" 2>&1 </dev/null &
+PR_REVIEW_GUARD="$guard" PR_REVIEW_SHA="$sha" \
+    setsid bash "$SELF" --job "$repo" "$pr" "$claim" >>"$LOG" 2>&1 </dev/null &
 
 silent

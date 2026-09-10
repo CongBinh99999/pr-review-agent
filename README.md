@@ -66,11 +66,14 @@ chmod 600 ~/.hermes/state/pr-review/webhook-secret
     --description "Claude Code review PR"
 ```
 
-Dấu cách đầu dòng `hermes` là cố ý — với `HISTCONTROL=ignorespace` thì lệnh
-không vào shell history. Secret vẫn hiện thoáng qua trong `ps` lúc chạy: Hermes
-chỉ nhận secret qua tham số dòng lệnh, không có đường env/stdin. Đọc lại secret
-bằng `cat ~/.hermes/state/pr-review/webhook-secret` khi cần dán vào GitHub, rồi
-`shred -u` file đó — bản chính đã nằm trong `webhook_subscriptions.json`.
+**Secret sẽ lộ, hãy biết trước điều đó.** Hermes chỉ nhận secret qua tham số
+dòng lệnh (không có đường env/stdin), nên nó hiện trong `ps` lúc chạy và vào
+shell history — dấu cách đầu dòng chỉ giúp nếu bạn đã bật `HISTCONTROL=ignorespace`
+(bash) hoặc `setopt HIST_IGNORE_SPACE` (zsh, **không** bật sẵn). Đọc lại bằng
+`cat ~/.hermes/state/pr-review/webhook-secret` để dán vào GitHub rồi xoá file
+(`rm`; trên filesystem journaled/CoW thì `shred` không đảm bảo gì hơn). Bản
+chính nằm trong `webhook_subscriptions.json`. Coi đây là secret của môi trường
+dev — muốn chặt chẽ thì xoay secret khi lên production.
 
 **4. Trỏ GitHub vào** — Settings → Webhooks → Add webhook:
 
@@ -113,7 +116,13 @@ python3 test_pr_review.py                       # self-check
   allowlist rỗng, không tool nào — với cwd trỏ vào thư mục rỗng và env chỉ gồm
   danh sách biến tối thiểu (token của gateway không đi vào). Đã kiểm bằng file
   mồi: phiên không đọc được file trên đĩa.
-- **`claude -p` treo quá 15 phút** → job bị giết, ghi log, không comment.
+- **`claude -p` quá 15 phút** → job bị giết và comment ⚠️ báo hỏng lên PR.
+- **Push mới khi job cũ đang chạy** → hook ghi sha mới vào file mốc; job cũ tự
+  thấy lỗi thời và bỏ qua bước đăng comment (huỷ hợp tác, không dùng `kill`).
+- **Review quá 60k ký tự** → cắt bớt trước khi đăng, vì GitHub từ chối comment
+  dài hơn 65536 ký tự.
+- **PR đóng rồi mở lại** (`reopened`, cùng sha) → bỏ qua: review của sha đó vẫn
+  còn nguyên trên PR.
 
 ## Vì sao hook phải thoát ngay
 

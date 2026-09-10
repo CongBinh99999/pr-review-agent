@@ -15,6 +15,7 @@ import time
 import uuid
 
 GH_TIMEOUT = 60
+MAX_COMMENT = 60_000  # GitHub từ chối comment quá 65536 ký tự
 MAX_DIFF_LINES = 1500
 MAX_DIFF_CHARS = 120_000
 CLAUDE_TIMEOUT = 900
@@ -45,20 +46,20 @@ Không tóm tắt lại diff, không khen. Mỗi phát hiện 1-3 dòng.
 Nếu không có gì đáng nói, trả lời đúng một dòng: Không thấy vấn đề đáng lưu ý."""
 
 
-# Chỉ những biến này đi tiếp vào tiến trình xử lý dữ liệu không tin cậy.
 # Gateway Hermes mang token Feishu/GitHub trong env — kế thừa cả `os.environ`
 # là đưa thẳng chúng vào phiên đang đọc diff của người ngoài.
-KEEP_ENV = (
+BASE_ENV = (
     "PATH", "USER", "LOGNAME", "SHELL", "TERM", "TMPDIR", "TZ",
     "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE",
     "SSL_CERT_FILE", "SSL_CERT_DIR",
-    # gh lưu token trong keyring, cần DBus để đọc.
-    "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR",
 )
+# Chỉ `gh` được cấp đường vào keyring chứa token GitHub. Phiên claude đọc diff
+# của người ngoài thì không — kể cả khi hàng rào tool có thủng.
+GH_ONLY_ENV = ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR")
 
 
-def child_env():
-    """Env cho `gh` và `claude`.
+def child_env(for_gh):
+    """Env cho tiến trình con.
 
     Hermes ghi đè HOME cho tiến trình con (xem `apply_subprocess_home_env`) và
     cất bản gốc vào HERMES_REAL_HOME. Với HOME sai, `gh` không thấy
@@ -66,18 +67,21 @@ def child_env():
     keyring. Lấy lại home thật từ /etc/passwd nên không phụ thuộc biến nào.
     """
     home = os.environ.get("HERMES_REAL_HOME") or pwd.getpwuid(os.getuid()).pw_dir
-    env = {k: os.environ[k] for k in KEEP_ENV if k in os.environ}
-    env.update(
-        HOME=home,
-        GH_CONFIG_DIR=os.path.join(home, ".config", "gh"),
-        GH_NO_UPDATE_NOTIFIER="1",
-        GH_PROMPT_DISABLED="1",
-        NO_COLOR="1",
-    )
+    keys = BASE_ENV + (GH_ONLY_ENV if for_gh else ())
+    env = {k: os.environ[k] for k in keys if k in os.environ}
+    # claude cần HOME để tìm thông tin đăng nhập trong ~/.claude.
+    env.update(HOME=home, NO_COLOR="1")
+    if for_gh:
+        env.update(
+            GH_CONFIG_DIR=os.path.join(home, ".config", "gh"),
+            GH_NO_UPDATE_NOTIFIER="1",
+            GH_PROMPT_DISABLED="1",
+        )
     return env
 
 
-ENV = child_env()
+GH_ENV = child_env(for_gh=True)
+CLAUDE_ENV = child_env(for_gh=False)
 
 
 def log(msg):
@@ -125,7 +129,7 @@ def fence(diff):
     return nonce, f"BEGIN DIFF {nonce}\n{diff}\nEND DIFF {nonce}\n"
 
 
-def run(argv, stdin=None, timeout=GH_TIMEOUT, cwd=None):
+def run(argv, stdin=None, timeout=GH_TIMEOUT, cwd=None, env=None):
     """Chạy lệnh, trả stdout hoặc None nếu lỗi/timeout."""
     try:
         p = subprocess.run(
@@ -135,7 +139,7 @@ def run(argv, stdin=None, timeout=GH_TIMEOUT, cwd=None):
             text=True,
             timeout=timeout,
             cwd=cwd,
-            env=ENV,
+            env=env or GH_ENV,
         )
     except subprocess.TimeoutExpired:
         log(f"TIMEOUT {timeout}s: {' '.join(argv[:3])}")
@@ -147,6 +151,23 @@ def run(argv, stdin=None, timeout=GH_TIMEOUT, cwd=None):
         log(f"LỖI rc={p.returncode}: {' '.join(argv[:3])} :: {p.stderr.strip()[:300]}")
         return None
     return p.stdout
+
+
+def stale():
+    """True nếu PR đã có commit mới hơn sha mà job này đang review.
+
+    Huỷ hợp tác thay cho `kill`: hook chỉ ghi sha mới nhất vào file mốc, job cũ
+    tự thấy mình lỗi thời và không đăng comment. Không còn pidfile, không còn
+    `kill -TERM -- -<pgid>` bắn nhầm process group khi PID bị OS cấp lại.
+    """
+    guard, sha = os.environ.get("PR_REVIEW_GUARD"), os.environ.get("PR_REVIEW_SHA")
+    if not guard or not sha:
+        return False
+    try:
+        with open(guard) as f:
+            return f.read().strip() != sha
+    except OSError:
+        return False
 
 
 def fail(repo, pr, why):
@@ -170,14 +191,19 @@ def main():
         sys.exit("usage: pr_review.py <owner/repo> <pr_number>")
     repo = sys.argv[1]
     try:
-        pr = str(int(sys.argv[2]))
+        n = int(sys.argv[2])
+        if n <= 0:
+            raise ValueError
+        pr = str(n)  # số âm sẽ bị `gh` parse như flag
     except ValueError:
-        sys.exit(f"pr_number phải là số nguyên, nhận: {sys.argv[2]!r}")
+        sys.exit(f"pr_number phải là số nguyên dương, nhận: {sys.argv[2]!r}")
 
     started = time.time()
-    log(f"BẮT ĐẦU repo={repo} pr={pr} home={ENV['HOME']}")
+    log(f"BẮT ĐẦU repo={repo} pr={pr} home={GH_ENV['HOME']}")
 
-    # Thử lại một lần: lần treo 120s ở PR #2 là do gh dò keyring dưới HOME sai.
+    # Thử lại một lần. Không phải để bù cho bug HOME (child_env đã sửa gốc) mà
+    # vì `gh` thật sự gặp i/o timeout tới api.github.com — đã xảy ra và lần thử
+    # thứ hai cứu được.
     diff = run(["gh", "pr", "diff", pr, "--repo", repo])
     if diff is None:
         log("thử lại gh pr diff")
@@ -202,12 +228,20 @@ def main():
             stdin=fenced,
             timeout=CLAUDE_TIMEOUT,
             cwd=empty,
+            env=CLAUDE_ENV,
         )
     if review is None:
         return 1 if fail(repo, pr, "Claude Code lỗi hoặc quá hạn") else 2
     review = review.strip()
     if not review:
         return 1 if fail(repo, pr, "Claude Code trả về rỗng") else 2
+
+    if stale():
+        log("BỎ QUA: đã có sha mới hơn cho PR này, không đăng review cũ")
+        return 0
+
+    if len(review) > MAX_COMMENT:
+        review = review[:MAX_COMMENT] + "\n\n_[... review bị cắt vì quá dài ...]_"
 
     comment = f"🤖 **Claude Code review**\n\n{review}"
     if cut:
