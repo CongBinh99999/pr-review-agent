@@ -16,10 +16,16 @@ CLI="${PR_REVIEW_CLI:-$SELF_DIR/../pr_review.py}"
 if [ "${1:-}" = "--job" ]; then
     repo=$2 pr=$3 claim=$4
     "$CLI" "$repo" "$pr"
-    # Mã 2 = hỏng mà chưa báo được lên PR (thường là `gh` chết). Nhả claim để
-    # delivery sau còn chạy lại. Mã 1 = đã có comment ⚠️ trên PR, giữ claim
-    # nên redeliver không đẻ comment trùng.
-    [ $? -eq 2 ] && rmdir "$claim" 2>/dev/null
+    rc=$?
+    # 0 = xong, 1 = đã báo hỏng lên PR. Cả hai đều "đã xử lý xong sha này":
+    # đổi .claim -> .done để chống trùng vĩnh viễn, GC không đụng tới.
+    # 2 = chưa báo được (gh chết) -> nhả claim cho delivery sau chạy lại.
+    # Chết bằng signal (OOM 137, thiếu file 127) thì .claim ở lại và GC dọn
+    # sau 60 phút — job dài nhất ~16 phút nên quá 1 giờ chắc chắn là rác.
+    case $rc in
+        0|1) mv "$claim" "${claim%.claim}.done" 2>/dev/null ;;
+        2)   rmdir "$claim" 2>/dev/null ;;
+    esac
     exit 0
 fi
 
@@ -67,16 +73,21 @@ if ! grep -qxF "$repo" "$ALLOW" 2>/dev/null; then
     silent
 fi
 
-# Claim rò khi job chết bất thường (reboot, OOM, gateway restart) sẽ khoá PR
-# đó vĩnh viễn. Job dài nhất ~16 phút nên claim quá 1 giờ chắc chắn là rác.
+# Chỉ dọn .claim (job đang chạy hoặc đã chết bất thường), không đụng .done.
+# Đụng .done là phá luôn cam kết chống trùng: redeliver sau 1 giờ sẽ đẻ comment
+# review thứ hai cho đúng sha cũ.
 find "$STATE" -maxdepth 1 -name '*.claim' -type d -mmin +60 -exec rmdir {} + 2>/dev/null
 
 key="${repo//\//_}#$pr"
 claim="$STATE/$key@$sha.claim"
 
-# Claim theo từng sha, tạo bằng mkdir nên atomic: hai delivery song song cùng
-# một sha thì chỉ một cái vào được. `reopened` mang đúng sha cũ nên sẽ bị chặn
-# ở đây — đúng ý: review của sha đó vẫn còn nguyên trên PR, không cần làm lại.
+# Sha đã xử lý xong rồi thì thôi, vĩnh viễn. `reopened` và nút Redeliver của
+# GitHub đều mang đúng sha cũ nên dừng ở đây — review của sha đó vẫn còn
+# nguyên trên PR.
+[ -d "${claim%.claim}.done" ] && silent
+
+# Claim tạo bằng mkdir nên atomic: hai delivery song song cùng một sha thì chỉ
+# một cái vào được.
 mkdir "$claim" 2>/dev/null || silent
 
 # Job tự hỏi GitHub xem sha của mình còn là HEAD không trước khi đăng comment.

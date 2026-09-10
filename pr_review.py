@@ -17,6 +17,8 @@ import uuid
 
 GH_TIMEOUT = 60
 MAX_COMMENT = 60_000  # GitHub từ chối comment quá 65536 ký tự
+HEADER = "🤖 **Claude Code review**\n\n"
+TRUNCATED = "\n\n_[... review bị cắt vì quá dài ...]_"
 MAX_DIFF_LINES = 1500
 MAX_DIFF_CHARS = 120_000
 CLAUDE_TIMEOUT = 900
@@ -96,7 +98,7 @@ def cap_diff(diff, max_lines=MAX_DIFF_LINES, max_chars=MAX_DIFF_CHARS):
     thể là vài MB, đủ để claude nuốt trọn rồi treo tới hết timeout.
     """
     lines = diff.split("\n")
-    kept, size, reasons = [], 0, []
+    kept, size, reasons, partial = [], 0, [], False
 
     if len(lines) > max_lines:
         reasons.append(f"quá {max_lines} dòng")
@@ -108,6 +110,7 @@ def cap_diff(diff, max_lines=MAX_DIFF_LINES, max_chars=MAX_DIFF_CHARS):
             room = max_chars - size - 1
             if room > 0:
                 kept.append(line[:room])
+                partial = True
             reasons.append(f"quá {max_chars} ký tự")
             break
         size += len(line) + 1
@@ -116,8 +119,12 @@ def cap_diff(diff, max_lines=MAX_DIFF_LINES, max_chars=MAX_DIFF_CHARS):
     if not reasons:
         return diff, None
     dropped = len(lines) - len(kept)
-    tail = f"\n\n[... đã cắt {dropped} dòng cuối ...]" if dropped > 0 else "\n\n[... dòng cuối bị cắt ngang ...]"
-    return "\n".join(kept) + tail, " và ".join(reasons)
+    bits = []
+    if dropped > 0:
+        bits.append(f"đã cắt {dropped} dòng cuối")
+    if partial:
+        bits.append("dòng cuối bị cắt ngang")
+    return "\n".join(kept) + f"\n\n[... {', '.join(bits)} ...]", " và ".join(reasons)
 
 
 def fence(diff):
@@ -152,6 +159,18 @@ def run(argv, *, env, stdin=None, timeout=GH_TIMEOUT, cwd=None):
         log(f"LỖI rc={p.returncode}: {' '.join(argv[:3])} :: {p.stderr.strip()[:300]}")
         return None
     return p.stdout
+
+
+def defang(text):
+    """Trung hoà thứ GitHub biến thành notification cho người ngoài.
+
+    Output chịu ảnh hưởng của diff không tin cậy: một PR độc hại có thể lái
+    model in ra @mention hoặc #123 / owner/repo#123, và GitHub sẽ bắn thông
+    báo hoặc tạo cross-reference dưới danh nghĩa tài khoản người vận hành.
+    """
+    text = re.sub(r"(?<![\w`])@([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)", r"`@\1`", text)
+    text = re.sub(r"(?<![\w`/])((?:[A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?#\d+)", r"`\1`", text)
+    return text
 
 
 def stale(repo, pr):
@@ -196,6 +215,8 @@ def main():
     if len(sys.argv) != 3:
         sys.exit("usage: pr_review.py <owner/repo> <pr_number>")
     repo = sys.argv[1]
+    if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repo):
+        sys.exit(f"repo phải dạng owner/repo, nhận: {repo!r}")
     try:
         n = int(sys.argv[2])
         if n <= 0:
@@ -246,14 +267,11 @@ def main():
         log("BỎ QUA: PR đã có commit mới hơn, không đăng review lỗi thời")
         return 0
 
-    if len(review) > MAX_COMMENT:
-        review = review[:MAX_COMMENT] + "\n\n_[... review bị cắt vì quá dài ...]_"
-
-    # Output chịu ảnh hưởng của diff không tin cậy. Bọc @mention lại để một
-    # PR độc hại không biến bot thành máy spam notification.
-    review = re.sub(r"(?<![\w`])@([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)", r"`@\1`", review)
-
-    comment = f"🤖 **Claude Code review**\n\n{review}"
+    comment = f"{HEADER}{defang(review)}"
+    if len(comment) > MAX_COMMENT:
+        # Cắt SAU khi escape: escape làm dài thêm, cắt trước là vẫn có thể vượt
+        # trần 65536 của GitHub rồi bị 422 và mất trắng cả lần review.
+        comment = comment[:MAX_COMMENT] + TRUNCATED
     if cut:
         comment += f"\n\n---\n_Diff {cut} — chỉ phần đầu được review._"
 

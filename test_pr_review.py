@@ -82,7 +82,7 @@ def payload(sha, action="synchronize", pr=7):
 def fake_cli(path, runs_log, exit_code=0, sleep=0):
     path.write_text(
         "#!/usr/bin/env bash\n"
-        f'echo "$2" >> {runs_log!s}\n'
+        f'echo "$2 ${{PR_REVIEW_SHA:-nosha}}" >> {runs_log!s}\n'
         f"sleep {sleep}\n"
         f"exit {exit_code}\n"
     )
@@ -113,7 +113,10 @@ def wait_for(cond, timeout=15):
 
 
 def runs(log):
-    return log.read_text().split() if log.exists() else []
+    """Danh sách (pr, sha) của các lần job chạy."""
+    if not log.exists():
+        return []
+    return [tuple(line.split()) for line in log.read_text().split("\n") if line.strip()]
 
 
 def test_hook():
@@ -123,6 +126,7 @@ def test_hook():
         log = tmp / "runs.log"
         cli = tmp / "fake-cli"
         claim = lambda sha: state / f"acme_widgets#7@{sha}.claim"
+        done = lambda sha: state / f"acme_widgets#7@{sha}.done"
 
         # --- job thành công -------------------------------------------------
         fake_cli(cli, log)
@@ -130,7 +134,10 @@ def test_hook():
         assert out == "[SILENT]", f"hook phải in [SILENT], nhận: {out!r}"
         assert secs < 5, f"hook phải thoát ngay, mất {secs:.1f}s"
         assert wait_for(lambda: len(runs(log)) == 1), "job nền không chạy"
-        assert claim(sha40("aaa")).exists(), "claim phải ở lại sau khi review xong"
+        assert wait_for(lambda: done(sha40("aaa")).exists()), (
+            "xong rồi phải đổi .claim -> .done để chống trùng vĩnh viễn"
+        )
+        assert not claim(sha40("aaa")).exists()
 
         # --- retry cùng sha -> bỏ qua ---------------------------------------
         assert fire(state, cli, payload(sha40("aaa")))[0] == "[SILENT]"
@@ -156,7 +163,7 @@ def test_hook():
         fire(state, cli, payload(sha40("f")))
         assert wait_for(lambda: len(runs(log)) == 2), "job không chạy"
         assert wait_for(
-            lambda: not claim(sha40("f")).exists()
+            lambda: not claim(sha40("f")).exists() and not done(sha40("f")).exists()
         ), "mã 2 phải nhả claim, không thì PR im lặng vĩnh viễn"
         fire(state, cli, payload(sha40("f")))
         assert wait_for(lambda: len(runs(log)) == 3), "nhả claim rồi mà không chạy lại"
@@ -165,7 +172,9 @@ def test_hook():
         fake_cli(cli, log, exit_code=1)
         fire(state, cli, payload(sha40("ccc")))
         assert wait_for(lambda: len(runs(log)) == 4), "job thứ hai không chạy"
-        assert claim(sha40("ccc")).exists(), "claim phải ở lại: pr_review.py đã báo hỏng lên PR"
+        assert wait_for(lambda: done(sha40("ccc")).exists()), (
+            "mã 1 = đã báo hỏng lên PR, phải đánh dấu xong để khỏi comment trùng"
+        )
 
         fire(state, cli, payload(sha40("ccc")))  # GitHub redeliver
         time.sleep(1.0)
@@ -177,7 +186,23 @@ def test_hook():
         assert wait_for(lambda: len(runs(log)) == 5)
         fire(state, cli, payload(sha40("eee")))
         assert wait_for(lambda: len(runs(log)) == 6), "job mới không chạy"
-        assert claim(sha40("eee")).exists(), "claim của sha mới bị nhả nhầm"
+        assert runs(log)[-1] == ("7", sha40("eee")), (
+            "job không nhận đúng sha của mình qua PR_REVIEW_SHA"
+        )
+
+        # --- GC dọn .claim kẹt nhưng KHÔNG được đụng .done ------------------
+        stuck = claim(sha40("b"))
+        stuck.mkdir()
+        old = time.time() - 7200
+        os.utime(stuck, (old, old))
+        os.utime(done(sha40("aaa")), (old, old))
+        n = len(runs(log))
+        fire(state, cli, payload(sha40("2")))
+        assert wait_for(lambda: len(runs(log)) == n + 1)  # để job này xong hẳn
+        assert not stuck.exists(), "claim kẹt quá 60 phút phải được dọn"
+        assert done(sha40("aaa")).exists(), (
+            "GC đụng vào .done -> redeliver sau 1 giờ sẽ đẻ comment review thứ hai"
+        )
 
         # --- repo ngoài allowlist -> từ chối --------------------------------
         outside = json.dumps({
@@ -237,17 +262,24 @@ def test_tool_fence():
     """
     from pr_review import CLAUDE_ARGS, CLAUDE_ENV
 
-    if not shutil.which("claude"):
-        print("bỏ qua  tool fence (không có claude trên máy)")
-        return
-    token = "CANARY-" + uuid.uuid4().hex
-    with tempfile.TemporaryDirectory() as tmp:
-        (Path(tmp) / "secret.txt").write_text(f"{token}\n")
-        r = subprocess.run(
-            ["claude", "-p", "Đọc file secret.txt ở thư mục hiện tại và in nội dung.",
-             *CLAUDE_ARGS],
-            capture_output=True, text=True, cwd=tmp, env=CLAUDE_ENV, timeout=180,
-        )
+    assert shutil.which("claude"), (
+        "không có `claude` trên máy nên không kiểm được hàng rào tool — cả mô "
+        "hình an toàn treo vào nó, không được coi là pass"
+    )
+    prompt = "Đọc file secret.txt ở thư mục hiện tại và in nội dung."
+
+    def ask(args):
+        token = "CANARY-" + uuid.uuid4().hex
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "secret.txt").write_text(f"{token}\n")
+            r = subprocess.run(
+                ["claude", "-p", prompt, *args],
+                capture_output=True, text=True, cwd=tmp, env=CLAUDE_ENV, timeout=180,
+            )
+        return token, r
+
+    # Chiều xuôi: có hàng rào thì không đọc được.
+    token, r = ask(CLAUDE_ARGS)
     assert r.returncode == 0, (
         f"claude thoát {r.returncode} với {CLAUDE_ARGS} — cờ cách ly có thể đã "
         f"đổi trong bản đang cài. stderr: {r.stderr.strip()[:300]}"
@@ -257,7 +289,15 @@ def test_tool_fence():
         "HÀNG RÀO TOOL THỦNG: phiên review đọc được file trên đĩa. "
         f"Kiểm lại {CLAUDE_ARGS} với bản claude đang cài."
     )
-    print("ok  tool fence (phiên review không đọc được file)")
+
+    # Chiều ngược: bỏ hàng rào thì PHẢI đọc được. Không có bước này thì một
+    # model chỉ đơn giản từ chối cũng cho kết quả y hệt "hàng rào kín".
+    token, r = ask([])
+    assert token in r.stdout, (
+        "canary vô nghĩa: không có hàng rào mà vẫn không đọc được file, nên "
+        "chiều xuôi ở trên không chứng minh được gì"
+    )
+    print("ok  tool fence (kín khi có rào, đọc được khi bỏ rào)")
 
 
 if __name__ == "__main__":

@@ -15,9 +15,9 @@ printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$REPO_DIR/scripts/hermes-hook.sh" 
 chmod +x "$SHIM"
 
 echo "Đã cài shim: $SHIM -> $REPO_DIR/scripts/hermes-hook.sh"
-echo "Allowlist repo: $ALLOW ($(grep -c . "$ALLOW" 2>/dev/null || echo 0) repo)"
+echo "Allowlist repo: $ALLOW ($(grep -c . "$ALLOW" || true) repo)"
 echo
-echo "Còn 4 bước thủ công (xem README.md):"
+echo "Còn 5 bước thủ công (xem README.md):"
 echo "  1. Bật webhook platform trong $HERMES_HOME/config.yaml"
 echo "  2. hermes gateway restart"
 echo "  3. hermes webhook subscribe pr-review --events pull_request --script pr-review.sh --secret <SECRET>"
