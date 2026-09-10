@@ -55,14 +55,19 @@ hermes gateway restart
 **3. Tạo route:**
 
 ```bash
-SECRET=$(openssl rand -hex 32)
-hermes webhook subscribe pr-review \
+umask 077
+openssl rand -hex 32 > ~/.hermes/state/pr-review/webhook-secret
+ hermes webhook subscribe pr-review \
     --events pull_request \
     --script pr-review.sh \
-    --secret "$SECRET" \
+    --secret "$(cat ~/.hermes/state/pr-review/webhook-secret)" \
     --description "Claude Code review PR"
-echo "$SECRET"
 ```
+
+Dấu cách đầu dòng `hermes` là cố ý — với `HISTCONTROL=ignorespace` thì lệnh
+không vào shell history. Secret vẫn hiện thoáng qua trong `ps` lúc chạy: Hermes
+chỉ nhận secret qua tham số dòng lệnh, không có đường env/stdin. Đọc lại secret
+bằng `cat ~/.hermes/state/pr-review/webhook-secret` khi cần dán vào GitHub.
 
 **4. Trỏ GitHub vào** — Settings → Webhooks → Add webhook:
 
@@ -90,11 +95,18 @@ python3 test_pr_review.py                       # self-check
 
 ## Hành vi
 
-- **Chống trùng** theo `head_sha`. GitHub retry gửi lại đúng payload cũ → bỏ qua.
+- **Chống trùng** theo `head_sha`, claim tạo bằng `mkdir` nên atomic — hai
+  delivery song song cùng một sha chỉ có một cái chạy.
+- **Job hỏng** (gh lỗi, claude timeout, bị kill) → nhả claim, lần redeliver sau
+  của GitHub được xử lý lại.
 - **Push mới cho cùng PR** → huỷ job đang chạy, chỉ review sha mới nhất.
-- **Diff > 1500 dòng hoặc > 120k ký tự** → chỉ review phần đầu, comment ghi rõ đã cắt.
-- **Diff là dữ liệu không tin cậy** — được bọc trong mốc BEGIN/END và prompt nói rõ
-  không nhận chỉ thị từ bên trong, chống prompt injection qua nội dung PR.
+- **Diff > 1500 dòng hoặc > 120k ký tự** → chỉ review phần đầu, comment ghi rõ
+  cắt vì lý do nào.
+- **Diff là dữ liệu không tin cậy.** Nó được bọc giữa hai mốc mang nonce ngẫu
+  nhiên (mốc cố định thì một file trong PR chỉ cần chứa đúng dòng đó là thoát
+  ra), và phiên review chạy `--restricted --strict-mcp-config` với danh sách
+  chặn tool, cwd trỏ vào thư mục rỗng. Đã kiểm bằng file mồi: phiên không đọc
+  được file trên đĩa.
 - **`claude -p` treo quá 15 phút** → job bị giết, ghi log, không comment.
 
 ## Vì sao hook phải thoát ngay

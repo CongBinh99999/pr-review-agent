@@ -14,10 +14,14 @@ CLI="${PR_REVIEW_CLI:-$SELF_DIR/../pr_review.py}"
 
 # --- chế độ job: chạy trong tiến trình nền đã tách khỏi Hermes ---------------
 if [ "${1:-}" = "--job" ]; then
-    # Job fail (gh lỗi, claude timeout, bị kill) thì xoá marker để lần
-    # redeliver sau của GitHub còn được xử lý lại.
-    "$CLI" "$2" "$3" || rm -f "$4"
-    rm -f "$5"
+    repo=$2 pr=$3 claim=$4 pidfile=$5
+    # $$ ở đây luôn là PGID: setsid làm tiến trình này thành session leader,
+    # dù nó có fork hay exec thẳng. Ghi từ bên trong job nên không đoán mò.
+    echo $$ > "$pidfile"
+    # Job hỏng (gh lỗi, claude timeout, bị kill) thì nhả claim để lần redeliver
+    # sau của GitHub còn được xử lý lại.
+    "$CLI" "$repo" "$pr" || rmdir "$claim" 2>/dev/null
+    rm -f "$pidfile"
     exit 0
 fi
 
@@ -36,26 +40,26 @@ print(d["repository"]["full_name"], d["number"], d["pull_request"]["head"]["sha"
 ') || silent
 read -r repo pr sha <<<"$fields"
 [ -n "${sha:-}" ] || silent
+case $sha in *[!0-9a-fA-F]* | "") silent ;; esac
 
 mkdir -p "$STATE"
+find "$STATE" -maxdepth 1 -name '*.claim' -type d -mtime +30 -exec rmdir {} + 2>/dev/null
+
 key="${repo//\//_}#$pr"
-marker="$STATE/$key.sha"
+claim="$STATE/$key@$sha.claim"
 pidfile="$STATE/$key.pid"
 
-# GitHub retry gửi lại đúng payload cũ -> cùng head_sha -> bỏ qua.
-[ -f "$marker" ] && [ "$(cat "$marker")" = "$sha" ] && silent
-echo "$sha" > "$marker"
+# Claim theo từng sha, tạo bằng mkdir nên atomic: hai delivery song song cùng
+# một sha thì chỉ một cái vào được. Claim gắn với sha nên job của sha cũ không
+# thể nhả claim của sha mới.
+mkdir "$claim" 2>/dev/null || silent
 
 # Push mới cho cùng PR: huỷ job cũ, chỉ review sha mới nhất.
-# ponytail: pidfile được job xoá khi xong nên hiếm khi ôi; nếu vẫn ôi và PID
-# đã bị OS cấp lại thì kill bắn nhầm process group. Cần chắc hơn thì lưu kèm
-# /proc/<pid>/stat starttime và đối chiếu trước khi kill.
 if [ -f "$pidfile" ]; then
     kill -TERM -- "-$(cat "$pidfile")" 2>/dev/null
 fi
 
-setsid bash "$SELF" --job "$repo" "$pr" "$marker" "$pidfile" \
+setsid bash "$SELF" --job "$repo" "$pr" "$claim" "$pidfile" \
     >>"$LOG" 2>&1 </dev/null &
-echo $! > "$pidfile"
 
 silent
