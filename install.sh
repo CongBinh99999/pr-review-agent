@@ -14,7 +14,8 @@ chmod +x "$SHIM"
 
 echo "Đã cài shim: $SHIM -> $REPO_DIR/scripts/hermes-hook.sh"
 echo
-echo "Còn 3 bước thủ công (xem README.md):"
+echo "Còn 4 bước thủ công (xem README.md):"
 echo "  1. Bật webhook platform trong $HERMES_HOME/config.yaml"
 echo "  2. hermes gateway restart"
 echo "  3. hermes webhook subscribe pr-review --events pull_request --script pr-review.sh --secret <SECRET>"
+echo "  4. Thêm webhook trên GitHub, chỉ chọn event Pull requests"

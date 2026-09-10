@@ -8,8 +8,20 @@
 # Vì vậy phải setsid + redirect cả 3 fd.
 set -uo pipefail
 
-SELF_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SELF="${BASH_SOURCE[0]}"
+SELF_DIR=$(cd "$(dirname "$SELF")" && pwd)
 CLI="${PR_REVIEW_CLI:-$SELF_DIR/../pr_review.py}"
+
+# --- chế độ job: chạy trong tiến trình nền đã tách khỏi Hermes ---------------
+if [ "${1:-}" = "--job" ]; then
+    # Job fail (gh lỗi, claude timeout, bị kill) thì xoá marker để lần
+    # redeliver sau của GitHub còn được xử lý lại.
+    "$CLI" "$2" "$3" || rm -f "$4"
+    rm -f "$5"
+    exit 0
+fi
+
+# --- chế độ hook: chạy trong request path của Hermes, phải nhanh -------------
 STATE="${PR_REVIEW_STATE:-${HERMES_HOME:-$HOME/.hermes}/state/pr-review}"
 LOG="$STATE/review.log"
 
@@ -35,11 +47,15 @@ pidfile="$STATE/$key.pid"
 echo "$sha" > "$marker"
 
 # Push mới cho cùng PR: huỷ job cũ, chỉ review sha mới nhất.
+# ponytail: pidfile được job xoá khi xong nên hiếm khi ôi; nếu vẫn ôi và PID
+# đã bị OS cấp lại thì kill bắn nhầm process group. Cần chắc hơn thì lưu kèm
+# /proc/<pid>/stat starttime và đối chiếu trước khi kill.
 if [ -f "$pidfile" ]; then
     kill -TERM -- "-$(cat "$pidfile")" 2>/dev/null
 fi
 
-setsid bash -c "echo \$\$ > '$pidfile'; exec '$CLI' '$repo' '$pr'" \
+setsid bash "$SELF" --job "$repo" "$pr" "$marker" "$pidfile" \
     >>"$LOG" 2>&1 </dev/null &
+echo $! > "$pidfile"
 
 silent

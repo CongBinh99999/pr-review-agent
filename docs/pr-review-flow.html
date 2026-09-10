@@ -55,7 +55,7 @@
 
     <svg viewBox="0 0 880 980" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="pr-review-flow-title pr-review-flow-desc">
       <title id="pr-review-flow-title">Luồng review PR tự động</title>
-      <desc id="pr-review-flow-desc">Flowchart cho thấy webhook pull_request từ GitHub đi qua Hermes gateway để xác thực chữ ký và chống trùng lặp, sau đó hook script tách một tiến trình nền chạy Claude Code review diff và đăng kết quả thành comment trên PR.</desc>
+      <desc id="pr-review-flow-desc">Flowchart cho thấy webhook pull_request từ GitHub đi qua Hermes gateway để xác thực chữ ký và chống trùng lặp theo head_sha, sau đó hook script tách một tiến trình nền chạy Claude Code review diff và đăng kết quả thành comment trên PR.</desc>
       <defs>
         <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
         <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
@@ -115,8 +115,8 @@
       <!-- N3 DECISION: dedupe -->
       <polygon points="280,256 376,304 280,352 184,304" fill="#f5f5f5"/>
       <polygon points="280,256 376,304 280,352 184,304" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
-      <text x="280" y="300" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Delivery mới?</text>
-      <text x="280" y="316" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">x-github-delivery</text>
+      <text x="280" y="300" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Sha mới?</text>
+      <text x="280" y="316" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">head_sha</text>
 
       <!-- N4 hook script -->
       <rect x="160" y="392" width="240" height="64" rx="6" fill="#f5f5f5"/>

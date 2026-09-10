@@ -34,7 +34,7 @@ gateway đang chạy. Không có dependency Python nào.
 ./install.sh
 ```
 
-Tạo shim `~/.hermes/scripts/pr-review.sh` trỏ về repo. Sau đó 3 bước thủ công:
+Tạo shim `~/.hermes/scripts/pr-review.sh` trỏ về repo. Sau đó 4 bước thủ công:
 
 **1. Bật webhook platform** — thêm vào `~/.hermes/config.yaml`:
 
@@ -92,7 +92,9 @@ python3 test_pr_review.py                       # self-check
 
 - **Chống trùng** theo `head_sha`. GitHub retry gửi lại đúng payload cũ → bỏ qua.
 - **Push mới cho cùng PR** → huỷ job đang chạy, chỉ review sha mới nhất.
-- **Diff > 1500 dòng** → chỉ review phần đầu, comment ghi rõ đã cắt.
+- **Diff > 1500 dòng hoặc > 120k ký tự** → chỉ review phần đầu, comment ghi rõ đã cắt.
+- **Diff là dữ liệu không tin cậy** — được bọc trong mốc BEGIN/END và prompt nói rõ
+  không nhận chỉ thị từ bên trong, chống prompt injection qua nội dung PR.
 - **`claude -p` treo quá 15 phút** → job bị giết, ghi log, không comment.
 
 ## Vì sao hook phải thoát ngay
@@ -104,6 +106,7 @@ fd, rồi in `[SILENT]` để Hermes bỏ qua event (không kích hoạt agent L
 
 ## Giới hạn đã biết
 
-- Một repo. Nhiều repo thì mỗi repo một route, hoặc bỏ filter và đọc `full_name`.
+- Nhiều repo dùng chung được một route (hook đọc `full_name` từ payload); mỗi repo
+  chỉ cần thêm webhook trỏ về đúng URL đó.
 - Không review inline theo dòng, chỉ một comment tổng.
 - State là file phẳng trong `~/.hermes/state/pr-review/`, mất khi xoá thư mục.

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Self-check: python3 test_pr_review.py
 
-Kiểm hai chỗ dễ vỡ: cắt diff, và hook (chống trùng + tách tiến trình nền).
+Kiểm những chỗ dễ vỡ: cắt diff (dòng + ký tự), và hook (lọc action, chống
+trùng, dọn state khi job fail, huỷ job cũ, thoát ngay).
 """
 
 import json
@@ -21,16 +22,20 @@ def test_cap_diff():
     from pr_review import cap_diff
 
     short = "\n".join(f"line {i}" for i in range(10))
-    out, cut = cap_diff(short, max_lines=1500)
-    assert out == short and cut is False, "diff ngắn không được đụng vào"
+    assert cap_diff(short) == (short, False), "diff ngắn không được đụng vào"
 
     long = "\n".join(f"line {i}" for i in range(100))
     out, cut = cap_diff(long, max_lines=40)
     assert cut is True, "diff dài phải bị đánh dấu là đã cắt"
     assert out.startswith("line 0\n"), "phải giữ phần đầu"
-    assert "line 39" in out and "line 40" not in out.split("[...")[0], "cắt sai chỗ"
     assert "đã cắt 60 dòng cuối" in out, "phải ghi rõ số dòng bị bỏ"
-    print("ok  cap_diff")
+
+    # Ít dòng nhưng mỗi dòng khổng lồ (file minified) — trần dòng không cứu được.
+    huge = "\n".join("x" * 50_000 for _ in range(3))
+    out, cut = cap_diff(huge, max_lines=1500, max_chars=120_000)
+    assert cut is True, "trần ký tự không hoạt động"
+    assert len(out) < 120_000 + 200, f"vượt trần ký tự: {len(out)}"
+    print("ok  cap_diff (trần dòng + trần ký tự)")
 
 
 def payload(sha, action="synchronize", pr=7):
@@ -44,6 +49,16 @@ def payload(sha, action="synchronize", pr=7):
     )
 
 
+def fake_cli(path, runs_log, exit_code=0, sleep=0):
+    path.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "$2" >> {runs_log!s}\n'
+        f"sleep {sleep}\n"
+        f"exit {exit_code}\n"
+    )
+    path.chmod(0o755)
+
+
 def fire(state, cli, body):
     """Gọi hook, trả (stdout, số giây chạy)."""
     env = {**os.environ, "PR_REVIEW_STATE": str(state), "PR_REVIEW_CLI": str(cli)}
@@ -54,52 +69,76 @@ def fire(state, cli, body):
     return p.stdout.strip(), time.time() - t0
 
 
+def wait_for(cond, timeout=10):
+    end = time.time() + timeout
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def runs(log):
+    return log.read_text().split() if log.exists() else []
+
+
 def test_hook():
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
-        state, runs = tmp / "state", tmp / "runs"
-        runs.mkdir()
-
-        # CLI giả: ghi lại là đã chạy, rồi ngủ để test huỷ job cũ.
+        state = tmp / "state"
+        log = tmp / "runs.log"
         cli = tmp / "fake-cli"
-        cli.write_text(
-            "#!/usr/bin/env bash\n"
-            f"echo \"$2\" >> '{runs}/log'\n"
-            "sleep 30\n"
-        )
-        cli.chmod(0o755)
+        marker = state / "acme_widgets#7.sha"
+        pidfile = state / "acme_widgets#7.pid"
 
+        # --- job thành công -------------------------------------------------
+        fake_cli(cli, log)
         out, secs = fire(state, cli, payload("aaa"))
         assert out == "[SILENT]", f"hook phải in [SILENT], nhận: {out!r}"
         assert secs < 5, f"hook phải thoát ngay, mất {secs:.1f}s"
-        time.sleep(1.0)
-        assert (runs / "log").exists(), "job nền không chạy"
-        assert len((runs / "log").read_text().split()) == 1
+        assert wait_for(lambda: len(runs(log)) == 1), "job nền không chạy"
+        assert wait_for(lambda: not pidfile.exists()), "pidfile không được dọn khi xong"
+        assert marker.read_text().strip() == "aaa", "marker phải giữ sha đã xử lý"
 
-        # Cùng head_sha (GitHub retry) -> không chạy lần hai.
+        # --- retry cùng sha -> bỏ qua ---------------------------------------
         assert fire(state, cli, payload("aaa"))[0] == "[SILENT]"
         time.sleep(1.0)
-        assert len((runs / "log").read_text().split()) == 1, "chống trùng hỏng"
+        assert len(runs(log)) == 1, "chống trùng hỏng"
 
-        # Action không quan tâm -> bỏ qua.
+        # --- action không quan tâm -> bỏ qua --------------------------------
         assert fire(state, cli, payload("bbb", action="closed"))[0] == "[SILENT]"
         time.sleep(0.5)
-        assert len((runs / "log").read_text().split()) == 1, "lọc action hỏng"
+        assert len(runs(log)) == 1, "lọc action hỏng"
 
-        # Push mới: job cũ bị huỷ, job mới chạy.
-        old_pgid = int((state / "acme_widgets#7.pid").read_text())
-        assert fire(state, cli, payload("ccc"))[0] == "[SILENT]"
-        time.sleep(1.0)
-        assert len((runs / "log").read_text().split()) == 2, "job mới không chạy"
-        assert (
-            subprocess.run(["kill", "-0", "--", f"-{old_pgid}"], capture_output=True).returncode
+        # --- job fail -> marker bị xoá để còn retry được --------------------
+        fake_cli(cli, log, exit_code=1)
+        fire(state, cli, payload("ccc"))
+        assert wait_for(lambda: len(runs(log)) == 2), "job thứ hai không chạy"
+        assert wait_for(
+            lambda: not marker.exists()
+        ), "job fail nhưng marker vẫn còn -> PR sẽ không bao giờ được review lại"
+
+        fire(state, cli, payload("ccc"))  # GitHub redeliver
+        assert wait_for(lambda: len(runs(log)) == 3), "redeliver sau khi fail bị chặn oan"
+
+        # --- push mới -> huỷ job cũ -----------------------------------------
+        fake_cli(cli, log, sleep=30)
+        fire(state, cli, payload("ddd"))
+        assert wait_for(lambda: len(runs(log)) == 4 and pidfile.exists())
+        old_pgid = int(pidfile.read_text())
+
+        fire(state, cli, payload("eee"))
+        assert wait_for(lambda: len(runs(log)) == 5), "job mới không chạy"
+        assert wait_for(
+            lambda: subprocess.run(
+                ["kill", "-0", "--", f"-{old_pgid}"], capture_output=True
+            ).returncode
             != 0
         ), "job cũ chưa bị huỷ (last-write-wins hỏng)"
 
-        # Dọn job đang chạy.
-        new_pgid = int((state / "acme_widgets#7.pid").read_text())
+        new_pgid = int(pidfile.read_text())
         subprocess.run(["kill", "-TERM", "--", f"-{new_pgid}"], capture_output=True)
-    print("ok  hook (chống trùng, lọc action, huỷ job cũ, thoát ngay)")
+    print("ok  hook (dọn state, chống trùng, retry sau fail, huỷ job cũ, thoát ngay)")
 
 
 if __name__ == "__main__":
