@@ -49,7 +49,12 @@ Viết lại những thứ này bằng FastAPI là làm lại việc đã xong.
   `install.sh` sinh một shim `exec` trỏ ngược về repo.
 - Hook **không nhận được HTTP header**, nên không có `X-GitHub-Delivery`.
   Chống trùng dùng `head_sha` — key này tốt hơn: retry của GitHub gửi lại đúng
-  payload cũ nên cùng sha, còn push mới thì khác sha.
+  payload cũ nên cùng sha, còn push mới thì khác sha. Claim tạo bằng `mkdir`
+  (atomic) và gắn với từng sha, để job của sha cũ không nhả claim của sha mới.
+- **Diff là dữ liệu do người ngoài kiểm soát.** Phiên `claude -p` phải chạy
+  `--restricted --strict-mcp-config`, danh sách chặn tool, cwd là thư mục rỗng,
+  và diff bọc giữa hai mốc mang nonce ngẫu nhiên. `--allowedTools ""` KHÔNG
+  chặn được gì — đã kiểm bằng file mồi.
 - Webhook secret sinh bằng `openssl rand`, lưu trong
   `~/.hermes/webhook_subscriptions.json` (chmod 600), không nằm trong repo.
 - Gateway đang phục vụ bot Feishu production. Bật webhook platform cần restart
@@ -71,8 +76,9 @@ Viết lại những thứ này bằng FastAPI là làm lại việc đã xong.
 
 | # | Task | File | Done when | Trạng thái |
 |---|---|---|---|---|
-| 1 | CLI review: lấy diff, cắt bớt, gọi Claude, đăng comment | `pr_review.py` | `./pr_review.py owner/repo N` đăng được comment lên PR thật | ✅ code xong |
-| 2 | Hook: lọc action, chống trùng, tách nền, `[SILENT]` | `scripts/hermes-hook.sh` | Cùng `head_sha` chỉ chạy 1 lần; push mới huỷ job cũ; hook thoát <1s | ✅ self-check pass |
-| 3 | Cài vào Hermes + nối end-to-end | `install.sh`, `README.md` | Mở PR thật → sau vài phút thấy comment review | ⬜ chờ bật webhook platform |
+| 1 | CLI review: lấy diff, cắt bớt, gọi Claude, đăng comment | `pr_review.py` | `./pr_review.py owner/repo N` đăng được comment lên PR thật | ✅ |
+| 2 | Hook: lọc action, chống trùng, tách nền, `[SILENT]` | `scripts/hermes-hook.sh` | Cùng `head_sha` chỉ chạy 1 lần; push mới huỷ job cũ; hook thoát <1s | ✅ |
+| 3 | Cài vào Hermes + nối end-to-end | `install.sh`, `README.md` | Mở PR thật → sau vài phút thấy comment review | ✅ PR #1, `opened` 126s / `synchronize` 141s |
+| 4 | Cách ly phiên review khỏi diff không tin cậy | `pr_review.py` | File mồi trên đĩa không đọc được từ phiên review | ✅ đã kiểm |
 
 Self-check: `python3 test_pr_review.py`
